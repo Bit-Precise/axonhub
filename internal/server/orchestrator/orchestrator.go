@@ -283,6 +283,9 @@ func (processor *ChatCompletionOrchestrator) Process(ctx context.Context, reques
 		// This allows override headers to modify the User-Agent if configured.
 		applyUserAgentPassThrough(outbound, processor.SystemService),
 		applyOverrideRequestHeaders(outbound),
+		// Installation identity override is authoritative over body pass-through
+		// and user overrides, and uses the final resolved session for stable slot selection.
+		overrideInstallationIdentity(outbound),
 		// Remove transport-incompatible fields after pass-through and overrides,
 		// so persistence and execution observe the same provider request.
 		finalizeTransportRequest(outbound),

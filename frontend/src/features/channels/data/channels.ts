@@ -113,6 +113,8 @@ const CREATE_CHANNEL_MUTATION = `
         }
         passThroughUserAgent
         passThroughBody
+        overrideCodexInstallationId
+        codexInstallationIdCount
         retryableStatusCodes
         retryableErrorPatterns {
           pattern
@@ -192,6 +194,8 @@ const DUPLICATE_CHANNEL_MUTATION = `
         }
         passThroughUserAgent
         passThroughBody
+        overrideCodexInstallationId
+        codexInstallationIdCount
         retryableStatusCodes
         retryableErrorPatterns {
           pattern
@@ -271,6 +275,8 @@ const BULK_CREATE_CHANNELS_MUTATION = `
         }
         passThroughUserAgent
         passThroughBody
+        overrideCodexInstallationId
+        codexInstallationIdCount
         retryableStatusCodes
         retryableErrorPatterns {
           pattern
@@ -350,6 +356,8 @@ const UPDATE_CHANNEL_MUTATION = `
         }
         passThroughUserAgent
         passThroughBody
+        overrideCodexInstallationId
+        codexInstallationIdCount
         retryableStatusCodes
         retryableErrorPatterns {
           pattern
@@ -544,6 +552,8 @@ const BULK_IMPORT_CHANNELS_MUTATION = `
           }
           passThroughUserAgent
           passThroughBody
+          overrideCodexInstallationId
+          codexInstallationIdCount
           retryableStatusCodes
           retryableErrorPatterns {
             pattern
@@ -779,6 +789,8 @@ const BULK_UPDATE_CHANNEL_ORDERING_MUTATION = `
           }
           passThroughUserAgent
           passThroughBody
+          overrideCodexInstallationId
+          codexInstallationIdCount
           retryableStatusCodes
           retryableErrorPatterns {
             pattern
@@ -938,6 +950,8 @@ const CHANNEL_QUERY_FULL_NODE_SELECTION = `
             }
             passThroughUserAgent
             passThroughBody
+            overrideCodexInstallationId
+            codexInstallationIdCount
             rateLimit {
               rpm
               tpm

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -15,6 +16,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/looplj/axonhub/llm"
+	"github.com/looplj/axonhub/llm/httpclient"
 	"github.com/looplj/axonhub/llm/oauth"
 	"github.com/looplj/axonhub/llm/simulator"
 	"github.com/looplj/axonhub/llm/transformer/openai"
@@ -191,6 +194,127 @@ func TestCodexOutbound_ReplacesMalformedClientTurnMetadata(t *testing.T) {
 	assertCodexInstallationClientMetadata(t, finalReq, testInstallationID)
 }
 
+func TestCodexOutbound_DisabledInstallationOverridePreservesClientMetadata(t *testing.T) {
+	inbound := openai.NewInboundTransformer()
+	outbound, err := NewOutboundTransformer(Params{
+		TokenProvider: staticTokenGetter{creds: &oauth.OAuthCredentials{
+			AccessToken: testAccessTokenWithAccountID(t),
+			ExpiresAt:   time.Now().Add(time.Hour),
+		}},
+	})
+	require.NoError(t, err)
+	sim := simulator.NewSimulator(inbound, outbound)
+	req := newCodexChatCompletionRequest(t)
+	req.Header.Set(TurnMetadataHeader, `{"installation_id":"client-machine-id","session_id":"session-1"}`)
+
+	finalReq, err := sim.Simulate(t.Context(), req)
+	require.NoError(t, err)
+
+	var metadata TurnMetadata
+	require.NoError(t, json.Unmarshal([]byte(finalReq.Header.Get(TurnMetadataHeader)), &metadata))
+	require.Equal(t, "client-machine-id", metadata.InstallationID)
+}
+
+func TestCodexOutbound_InstallationPoolIsStablePerSession(t *testing.T) {
+	outbound, err := NewOutboundTransformer(Params{
+		TokenProvider: staticTokenGetter{creds: &oauth.OAuthCredentials{
+			AccessToken: testAccessTokenWithAccountID(t),
+			ExpiresAt:   time.Now().Add(time.Hour),
+		}},
+		InstallationIDs: []string{"installation-0", "installation-1", "installation-2"},
+	})
+	require.NoError(t, err)
+
+	seen := map[string]struct{}{}
+	for i := range 100 {
+		sessionID := fmt.Sprintf("session-%d", i)
+		first := outbound.installationIDForSession(sessionID)
+		second := outbound.installationIDForSession(sessionID)
+		require.Equal(t, first, second)
+		seen[first] = struct{}{}
+	}
+	require.Equal(t, map[string]struct{}{
+		"installation-0": {},
+		"installation-1": {},
+		"installation-2": {},
+	}, seen)
+}
+
+func TestCodexOutbound_ChannelSwitchUsesDestinationPool(t *testing.T) {
+	first := &OutboundTransformer{installationIDs: []string{"first-0", "first-1"}}
+	second := &OutboundTransformer{installationIDs: []string{"second-0", "second-1"}}
+	sessionID := "shared-retry-session"
+
+	firstID := first.installationIDForSession(sessionID)
+	secondID := second.installationIDForSession(sessionID)
+	require.Contains(t, first.installationIDs, firstID)
+	require.Contains(t, second.installationIDs, secondID)
+	require.NotEqual(t, firstID, secondID)
+	require.Equal(t, firstID, first.installationIDForSession(sessionID))
+	require.Equal(t, secondID, second.installationIDForSession(sessionID))
+}
+
+func TestCodexOutbound_MissingSessionIsStableAcrossRetries(t *testing.T) {
+	rawRequest, err := httpclient.ReadHTTPRequest(newCodexChatCompletionRequest(t))
+	require.NoError(t, err)
+	llmRequest, err := openai.NewInboundTransformer().TransformRequest(t.Context(), rawRequest)
+	require.NoError(t, err)
+	llmRequest.RawRequest = rawRequest
+
+	outbound, err := NewOutboundTransformer(Params{
+		TokenProvider: staticTokenGetter{creds: &oauth.OAuthCredentials{
+			AccessToken: testAccessTokenWithAccountID(t),
+			ExpiresAt:   time.Now().Add(time.Hour),
+		}},
+		InstallationIDs: []string{"installation-0", "installation-1"},
+	})
+	require.NoError(t, err)
+
+	first, err := outbound.TransformRequest(t.Context(), llmRequest)
+	require.NoError(t, err)
+	second, err := outbound.TransformRequest(t.Context(), llmRequest)
+	require.NoError(t, err)
+
+	require.NotEmpty(t, first.Headers.Get(SessionHeaderHyphen))
+	require.Equal(t, first.Headers.Get(SessionHeaderHyphen), second.Headers.Get(SessionHeaderHyphen))
+	require.Equal(t,
+		outbound.installationIDForSession(first.Headers.Get(SessionHeaderHyphen)),
+		outbound.installationIDForSession(second.Headers.Get(SessionHeaderHyphen)),
+	)
+}
+
+func TestCodexOutbound_OverridePreservesBodyTurnMetadata(t *testing.T) {
+	outbound, err := NewOutboundTransformer(Params{
+		TokenProvider:   staticTokenGetter{creds: &oauth.OAuthCredentials{}},
+		InstallationIDs: []string{"installation-0"},
+	})
+	require.NoError(t, err)
+
+	request := &httpclient.Request{
+		APIFormat: llm.APIFormatOpenAIResponse.String(),
+		Headers: http.Header{
+			SessionHeaderHyphen: {"session-1"},
+			TurnMetadataHeader:  {`{"installation_id":"client-id","session_id":"session-1","header_only":"kept"}`},
+		},
+		Body: []byte(`{"client_metadata":{"x-codex-installation-id":"client-id","x-codex-turn-metadata":"{\"installation_id\":\"client-id\",\"session_id\":\"session-1\",\"body_only\":\"kept\"}"}}`),
+	}
+	require.NoError(t, outbound.OverrideInstallationIdentity(request))
+
+	var headerMetadata map[string]any
+	require.NoError(t, json.Unmarshal([]byte(request.Headers.Get(TurnMetadataHeader)), &headerMetadata))
+	require.Equal(t, "installation-0", headerMetadata["installation_id"])
+	require.Equal(t, "kept", headerMetadata["header_only"])
+
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(request.Body, &body))
+	clientMetadata := body["client_metadata"].(map[string]any)
+	require.Equal(t, "installation-0", clientMetadata["x-codex-installation-id"])
+	var bodyMetadata map[string]any
+	require.NoError(t, json.Unmarshal([]byte(clientMetadata["x-codex-turn-metadata"].(string)), &bodyMetadata))
+	require.Equal(t, "installation-0", bodyMetadata["installation_id"])
+	require.Equal(t, "kept", bodyMetadata["body_only"])
+}
+
 func assertCodexInstallationClientMetadata(t *testing.T, req *http.Request, expected string) {
 	t.Helper()
 
@@ -303,7 +427,7 @@ func newCodexSimulatorWithToken(t *testing.T, accessToken string) *simulator.Sim
 
 	inbound := openai.NewInboundTransformer()
 	outbound, err := NewOutboundTransformer(Params{
-		InstallationID: testInstallationID,
+		InstallationIDs: []string{testInstallationID},
 		TokenProvider: staticTokenGetter{
 			creds: &oauth.OAuthCredentials{
 				AccessToken: accessToken,

@@ -15,7 +15,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/samber/lo"
 	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 
 	"github.com/looplj/axonhub/llm"
 	"github.com/looplj/axonhub/llm/auth"
@@ -25,7 +24,6 @@ import (
 	"github.com/looplj/axonhub/llm/streams"
 	"github.com/looplj/axonhub/llm/transformer"
 	"github.com/looplj/axonhub/llm/transformer/openai/responses"
-	"github.com/looplj/axonhub/llm/transformer/shared"
 )
 
 const (
@@ -44,7 +42,7 @@ type OutboundTransformer struct {
 	transport       string
 	baseURL         string
 	alphaSearchPath string
-	installationID  string
+	installationIDs []string
 
 	// official reports whether the configured upstream is the official Codex
 	// backend (chatgpt.com). Official endpoints always stream SSE, so they keep
@@ -76,10 +74,9 @@ type Params struct {
 	BaseURL         string
 	Transport       string
 	AlphaSearchPath string
-	// InstallationID identifies the AxonHub channel as one stable Codex
-	// installation. Callers that own a persistent channel should provide a
-	// deterministic UUID; direct users fall back to one UUID per transformer.
-	InstallationID string
+	// InstallationIDs is the stable channel-scoped identity pool. An empty pool
+	// preserves the downstream installation identity.
+	InstallationIDs []string
 }
 
 // isOfficialCodexBaseURL reports whether baseURL points at the official Codex
@@ -108,11 +105,6 @@ func NewOutboundTransformer(params Params) (*OutboundTransformer, error) {
 	if alphaSearchPath == "" {
 		alphaSearchPath = "/alpha/search"
 	}
-	installationID := strings.TrimSpace(params.InstallationID)
-	if installationID == "" {
-		installationID = uuid.NewString()
-	}
-
 	// The underlying responses outbound requires baseURL/apiKey. We only need its request body logic.
 	// Use a dummy config and then override URL/auth.
 	ro, err := responses.NewOutboundTransformerWithConfig(&responses.Config{
@@ -129,7 +121,7 @@ func NewOutboundTransformer(params Params) (*OutboundTransformer, error) {
 		transport:         params.Transport,
 		baseURL:           strings.TrimSuffix(baseURL, "##"),
 		alphaSearchPath:   alphaSearchPath,
-		installationID:    installationID,
+		installationIDs:   params.InstallationIDs,
 		official:          isOfficialCodexBaseURL(baseURL),
 		responsesOutbound: ro,
 	}, nil
@@ -207,13 +199,6 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 	}
 
 	accountID := ExtractChatGPTAccountIDFromJWT(creds.AccessToken)
-	if rawTurnMetadata != "" {
-		if normalized, ok := NormalizeTurnMetadataInstallationID(rawTurnMetadata, t.installationID); ok {
-			rawTurnMetadata = normalized
-		} else {
-			rawTurnMetadata = ""
-		}
-	}
 
 	// Clone request so we do not mutate upstream pipeline state.
 	reqCopy := *llmReq
@@ -303,29 +288,21 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 	}
 
 	for _, header := range PassthroughHeaders {
-		if header == TurnMetadataHeader {
-			if rawTurnMetadata != "" {
-				hreq.Headers.Set(header, rawTurnMetadata)
-			}
-
-			continue
-		}
 		if value := rawHeaders.Get(header); value != "" {
 			hreq.Headers.Set(header, value)
 		}
 	}
 
-	if rawSessionID != "" {
-		hreq.Headers.Set(SessionHeaderHyphen, rawSessionID)
-	} else if sessionID := ExtractSessionIDFromTurnMetadata(rawTurnMetadata); sessionID != "" {
-		hreq.Headers.Set(SessionHeaderHyphen, sessionID)
-	} else if hreq.Headers.Get(SessionHeaderHyphen) == "" {
-		if sessionID, ok := shared.GetSessionID(ctx); ok {
-			hreq.Headers.Set(SessionHeaderHyphen, sessionID)
-		} else {
-			hreq.Headers.Set(SessionHeaderHyphen, uuid.NewString())
-		}
+	bodySessionID := ""
+	if llmReq.RawRequest != nil {
+		bodySessionID = gjson.GetBytes(llmReq.RawRequest.Body, "client_metadata.session_id").String()
 	}
+	hreq.Headers.Set(SessionHeaderHyphen, resolveSessionID(ctx, llmReq,
+		rawSessionID,
+		ExtractSessionIDFromTurnMetadata(rawTurnMetadata),
+		bodySessionID,
+		hreq.Headers.Get(SessionHeaderHyphen),
+	))
 
 	// Fabricate the remaining Codex identity headers for non-Codex inbound
 	// clients so the upstream always sees a complete Codex session shape.
@@ -341,8 +318,9 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 		hreq.Headers.Set(WindowIDHeader, windowID)
 	}
 	if hreq.Headers.Get(TurnMetadataHeader) == "" {
+		installationID := installationIDForAccount(accountID)
 		turnMetadata, _ := json.Marshal(TurnMetadata{
-			InstallationID:      t.installationID,
+			InstallationID:      installationID,
 			SessionID:           sessionID,
 			ThreadID:            sessionID,
 			TurnID:              uuid.NewString(),
@@ -353,9 +331,6 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 			TurnStartedAtUnixMS: turnStartedAtUnixMS(sessionID),
 		})
 		hreq.Headers.Set(TurnMetadataHeader, string(turnMetadata))
-	}
-	if normalized, ok := NormalizeTurnMetadataInstallationID(hreq.Headers.Get(TurnMetadataHeader), t.installationID); ok {
-		hreq.Headers.Set(TurnMetadataHeader, normalized)
 	}
 	if hreq.Headers.Get(ClientRequestIDHeader) == "" {
 		hreq.Headers.Set(ClientRequestIDHeader, uuid.NewString())
@@ -378,23 +353,15 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 		hreq.Headers.Set("Version", codexDefaultVersion)
 	}
 
-	// Current Codex clients send the installation identity both as turn
-	// metadata and as a flat client_metadata field. Keep both representations
-	// channel-scoped so the upstream never sees the downstream machine ID when
-	// AxonHub rebuilds the request body. Body pass-through, when enabled, runs
-	// later in the pipeline and intentionally restores the original body.
-	hreq.Body, err = sjson.SetBytes(hreq.Body, "client_metadata.x-codex-installation-id", t.installationID)
-	if err != nil {
-		return nil, fmt.Errorf("set codex installation client metadata: %w", err)
+	if len(t.installationIDs) > 0 {
+		if err := t.OverrideInstallationIdentity(hreq); err != nil {
+			return nil, fmt.Errorf("override codex installation identity: %w", err)
+		}
+		hreq.SkipInboundHeaderMerge = append(hreq.SkipInboundHeaderMerge,
+			"X-Codex-Installation-Id",
+			TurnMetadataHeader,
+		)
 	}
-	hreq.Body, err = sjson.SetBytes(hreq.Body, "client_metadata.x-codex-turn-metadata", hreq.Headers.Get(TurnMetadataHeader))
-	if err != nil {
-		return nil, fmt.Errorf("set codex turn client metadata: %w", err)
-	}
-	hreq.SkipInboundHeaderMerge = append(hreq.SkipInboundHeaderMerge,
-		"X-Codex-Installation-Id",
-		TurnMetadataHeader,
-	)
 
 	return hreq, nil
 }

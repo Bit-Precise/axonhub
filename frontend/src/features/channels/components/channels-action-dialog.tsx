@@ -392,6 +392,12 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
   const [passThroughBody, setPassThroughBody] = useState<boolean | null>(() => {
     return initialRow?.settings?.passThroughBody ?? null;
   });
+  const [overrideCodexInstallationId, setOverrideCodexInstallationId] = useState(
+    () => initialRow?.settings?.overrideCodexInstallationId ?? false
+  );
+  const [codexInstallationIdCount, setCodexInstallationIdCount] = useState(
+    () => initialRow?.settings?.codexInstallationIdCount ?? 1
+  );
   const [retryableStatusCodesText, setRetryableStatusCodesText] = useState(() =>
     formatRetryableStatusCodes(initialRow?.settings?.retryableStatusCodes)
   );
@@ -1334,6 +1340,7 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
         const settingsPatch: Partial<ChannelSettings> = {
           passThroughUserAgent,
           passThroughBody,
+          ...(isCodexType ? { overrideCodexInstallationId, codexInstallationIdCount } : {}),
           retryableStatusCodes,
           retryableErrorPatterns,
           // Cookie edits (including clearing the saved cookie) travel through
@@ -1399,6 +1406,7 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
           proxy: proxyConfig,
           passThroughUserAgent,
           passThroughBody,
+          ...(isCodexType ? { overrideCodexInstallationId, codexInstallationIdCount } : {}),
           retryableStatusCodes,
           retryableErrorPatterns,
           ...(selectedApiFormat === 'zenmux/video' ||
@@ -1841,6 +1849,8 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
             setProxyPassword(initialRow?.settings?.proxy?.password || '');
             setPassThroughUserAgent(initialRow?.settings?.passThroughUserAgent ?? null);
             setPassThroughBody(initialRow?.settings?.passThroughBody ?? null);
+            setOverrideCodexInstallationId(initialRow?.settings?.overrideCodexInstallationId ?? false);
+            setCodexInstallationIdCount(initialRow?.settings?.codexInstallationIdCount ?? 1);
             setRetryableStatusCodesText(formatRetryableStatusCodes(initialRow?.settings?.retryableStatusCodes));
             setRetryableErrorPatternsText(formatRetryableErrorPatterns(initialRow?.settings?.retryableErrorPatterns));
             // Reset provider and API format state
@@ -2851,6 +2861,41 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
                           </Select>
                         </div>
                       </FormItem>
+
+                      {isCodexType && (
+                        <FormItem className='grid grid-cols-1 items-start gap-x-6 gap-y-2 md:grid-cols-8'>
+                          <FormLabel className='pt-2 font-medium md:col-span-2 md:text-right'>
+                            {t('channels.dialogs.codexInstallationId.label')}
+                          </FormLabel>
+                          <div className='space-y-3 md:col-span-6'>
+                            <div className='flex items-center gap-2'>
+                              <Checkbox
+                                checked={overrideCodexInstallationId}
+                                onCheckedChange={(checked) => setOverrideCodexInstallationId(checked === true)}
+                              />
+                              <span className='text-sm'>{t('channels.dialogs.codexInstallationId.override')}</span>
+                            </div>
+                            {overrideCodexInstallationId && (
+                              <div className='space-y-1'>
+                                <Input
+                                  type='number'
+                                  min={1}
+                                  max={5}
+                                  step={1}
+                                  value={codexInstallationIdCount}
+                                  onChange={(event) => {
+                                    const value = Number(event.target.value);
+                                    setCodexInstallationIdCount(Number.isFinite(value) ? Math.min(5, Math.max(1, Math.trunc(value))) : 1);
+                                  }}
+                                />
+                                <p className='text-muted-foreground text-xs'>
+                                  {t('channels.dialogs.codexInstallationId.description')}
+                                </p>
+                              </div>
+                            )}
+                          </div>
+                        </FormItem>
+                      )}
 
                       <FormItem className='grid grid-cols-1 items-start gap-x-6 gap-y-2 md:grid-cols-8'>
                         <FormLabel className='pt-2 font-medium md:col-span-2 md:text-right'>

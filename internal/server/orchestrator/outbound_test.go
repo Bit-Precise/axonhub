@@ -46,11 +46,35 @@ type mockTransportFinalizer struct {
 	marker string
 }
 
+type mockInstallationIdentityOverrider struct {
+	*mockTransformer
+
+	called bool
+}
+
+func (m *mockInstallationIdentityOverrider) OverrideInstallationIdentity(request *httpclient.Request) error {
+	m.called = true
+	request.Headers.Set("X-Test-Installation-Id", "overridden")
+
+	return nil
+}
+
 func (m *mockTransportFinalizer) FinalizeTransportRequest(request *httpclient.Request) *httpclient.Request {
 	cloned := *request
 	cloned.Headers = request.Headers.Clone()
 	cloned.Headers.Set("X-Test-Transport", m.marker)
 	return &cloned
+}
+
+func TestOverrideInstallationIdentityMiddleware(t *testing.T) {
+	wrapped := &mockInstallationIdentityOverrider{mockTransformer: &mockTransformer{}}
+	processor := &PersistentOutboundTransformer{wrapped: wrapped}
+	request := &httpclient.Request{Headers: http.Header{"X-Test-Installation-Id": {"downstream"}}}
+
+	processed, err := overrideInstallationIdentity(processor).OnOutboundRawRequest(t.Context(), request)
+	require.NoError(t, err)
+	require.True(t, wrapped.called)
+	require.Equal(t, "overridden", processed.Headers.Get("X-Test-Installation-Id"))
 }
 
 func (m *mockTransformer) TransformRequest(ctx context.Context, req *llm.Request) (*httpclient.Request, error) {

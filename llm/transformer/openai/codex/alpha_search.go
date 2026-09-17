@@ -12,7 +12,6 @@ import (
 
 	"github.com/looplj/axonhub/llm"
 	"github.com/looplj/axonhub/llm/httpclient"
-	"github.com/looplj/axonhub/llm/transformer/shared"
 )
 
 var ErrAlphaSearchRequest = errors.New("invalid alpha search request")
@@ -36,35 +35,16 @@ func (t *OutboundTransformer) transformAlphaSearchRequest(ctx context.Context, l
 	if llmReq.RawRequest != nil && llmReq.RawRequest.Headers != nil {
 		rawHeaders = llmReq.RawRequest.Headers
 	}
-	sessionID := GetSessionIDFromHeaders(rawHeaders)
-	if sessionID == "" {
-		var envelope struct {
-			ID string `json:"id"`
-		}
-		if json.Unmarshal(llmReq.AlphaSearch.Body, &envelope) == nil {
-			sessionID = strings.TrimSpace(envelope.ID)
-		}
+	var envelope struct {
+		ID string `json:"id"`
 	}
-	if sessionID == "" {
-		if value, ok := shared.GetSessionID(ctx); ok {
-			sessionID = value
-		} else {
-			sessionID = uuid.NewString()
-		}
-	}
+	_ = json.Unmarshal(llmReq.AlphaSearch.Body, &envelope)
+	sessionID := resolveSessionID(ctx, llmReq, GetSessionIDFromHeaders(rawHeaders), envelope.ID)
 
 	headers := make(http.Header)
 	headers.Set("Content-Type", "application/json")
 	headers.Set("Accept", "application/json")
 	for _, name := range PassthroughHeaders {
-		if name == TurnMetadataHeader {
-			raw := rawHeaders.Get(name)
-			if normalized, ok := NormalizeTurnMetadataInstallationID(raw, t.installationID); ok {
-				headers.Set(name, normalized)
-			}
-
-			continue
-		}
 		for _, value := range rawHeaders.Values(name) {
 			headers.Add(name, value)
 		}
@@ -93,8 +73,9 @@ func (t *OutboundTransformer) transformAlphaSearchRequest(ctx context.Context, l
 		headers.Set(BetaFeaturesHeader, fabricatedBetaFeatures)
 	}
 	if headers.Get(TurnMetadataHeader) == "" {
+		installationID := installationIDForAccount(accountID)
 		metadata := TurnMetadata{
-			InstallationID: t.installationID,
+			InstallationID: installationID,
 			SessionID:      sessionID,
 			ThreadID:       sessionID,
 			TurnID:         uuid.NewString(),
@@ -107,9 +88,6 @@ func (t *OutboundTransformer) transformAlphaSearchRequest(ctx context.Context, l
 			headers.Set(TurnMetadataHeader, string(encoded))
 		}
 	}
-	if normalized, ok := NormalizeTurnMetadataInstallationID(headers.Get(TurnMetadataHeader), t.installationID); ok {
-		headers.Set(TurnMetadataHeader, normalized)
-	}
 	if accountID != "" {
 		headers.Set("Chatgpt-Account-Id", accountID)
 	}
@@ -118,7 +96,7 @@ func (t *OutboundTransformer) transformAlphaSearchRequest(ctx context.Context, l
 	}
 
 	baseURL := strings.TrimRight(t.baseURL, "#/")
-	return &httpclient.Request{
+	request := &httpclient.Request{
 		Method:      http.MethodPost,
 		URL:         baseURL + t.alphaSearchPath,
 		Headers:     headers,
@@ -126,11 +104,15 @@ func (t *OutboundTransformer) transformAlphaSearchRequest(ctx context.Context, l
 		Auth:        &httpclient.AuthConfig{Type: httpclient.AuthTypeBearer, APIKey: creds.AccessToken},
 		RequestType: llm.RequestTypeAlphaSearch.String(),
 		APIFormat:   llm.APIFormatOpenAIAlphaSearch.String(),
-		SkipInboundHeaderMerge: []string{
-			"X-Codex-Installation-Id",
-			TurnMetadataHeader,
-		},
-	}, nil
+	}
+	if len(t.installationIDs) > 0 {
+		if err := t.OverrideInstallationIdentity(request); err != nil {
+			return nil, err
+		}
+		request.SkipInboundHeaderMerge = []string{"X-Codex-Installation-Id", TurnMetadataHeader}
+	}
+
+	return request, nil
 }
 
 func (t *OutboundTransformer) transformAlphaSearchResponse(ctx context.Context, resp *httpclient.Response) (*llm.Response, error) {

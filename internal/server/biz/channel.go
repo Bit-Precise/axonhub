@@ -582,6 +582,9 @@ func (svc *ChannelService) createChannel(ctx context.Context, input ent.CreateCh
 		if err := ValidateRateLimit(input.Settings.RateLimit); err != nil {
 			return nil, fmt.Errorf("invalid rate limit: %w", err)
 		}
+		if err := ValidateCodexInstallationIDSettings(input.Settings); err != nil {
+			return nil, err
+		}
 
 		if err := NormalizeRetryableStatusCodes(input.Settings); err != nil {
 			return nil, err
@@ -692,6 +695,18 @@ func NormalizeRetryableStatusCodes(settings *objects.ChannelSettings) error {
 
 	slices.Sort(codes)
 	settings.RetryableStatusCodes = slices.Compact(codes)
+
+	return nil
+}
+
+func ValidateCodexInstallationIDSettings(settings *objects.ChannelSettings) error {
+	if settings == nil || !settings.OverrideCodexInstallationID {
+		return nil
+	}
+	if settings.CodexInstallationIDCount < 1 || settings.CodexInstallationIDCount > objects.MaxCodexInstallationIDCount {
+		return fmt.Errorf("invalid Codex installation ID count %d: must be between 1 and %d",
+			settings.CodexInstallationIDCount, objects.MaxCodexInstallationIDCount)
+	}
 
 	return nil
 }
@@ -943,6 +958,9 @@ func (svc *ChannelService) UpdateChannel(ctx context.Context, id int, input *ent
 
 		if err := ValidateRateLimit(input.Settings.RateLimit); err != nil {
 			return nil, fmt.Errorf("invalid rate limit: %w", err)
+		}
+		if err := ValidateCodexInstallationIDSettings(input.Settings); err != nil {
+			return nil, err
 		}
 
 		if err := NormalizeRetryableStatusCodes(input.Settings); err != nil {

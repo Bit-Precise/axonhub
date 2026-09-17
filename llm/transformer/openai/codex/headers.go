@@ -21,6 +21,7 @@ import (
 const (
 	SessionHeader         = "Session_id"
 	SessionHeaderHyphen   = "Session-Id"
+	InstallationIDHeader  = "X-Codex-Installation-Id"
 	TurnMetadataHeader    = "X-Codex-Turn-Metadata"
 	WindowIDHeader        = "X-Codex-Window-Id"
 	ClientRequestIDHeader = "X-Client-Request-Id"
@@ -115,10 +116,14 @@ func (t *OutboundTransformer) OverrideInstallationIdentity(request *httpclient.R
 	if request.Headers == nil {
 		request.Headers = make(http.Header)
 	}
+	request.Headers.Del(InstallationIDHeader)
 
 	sessionID := GetSessionIDFromHeaders(request.Headers)
 	if sessionID == "" {
 		sessionID = strings.TrimSpace(gjson.GetBytes(request.Body, "client_metadata.session_id").String())
+	}
+	if sessionID == "" && request.TransformerMetadata != nil {
+		sessionID, _ = request.TransformerMetadata[resolvedSessionIDMetadataKey].(string)
 	}
 	installationID := t.installationIDForSession(sessionID)
 
@@ -142,7 +147,9 @@ func (t *OutboundTransformer) OverrideInstallationIdentity(request *httpclient.R
 	}
 	request.Headers.Set(TurnMetadataHeader, headerMetadata)
 
-	if request.APIFormat != llm.APIFormatOpenAIResponse.String() || !gjson.ValidBytes(request.Body) {
+	if request.RequestType == llm.RequestTypeCompact.String() ||
+		request.RequestType == llm.RequestTypeAlphaSearch.String() ||
+		!gjson.ValidBytes(request.Body) {
 		return nil
 	}
 
@@ -173,17 +180,23 @@ func resolveSessionID(ctx context.Context, llmReq *llm.Request, candidates ...st
 			return candidate
 		}
 	}
-	if sessionID, ok := shared.GetSessionID(ctx); ok && strings.TrimSpace(sessionID) != "" {
-		sessionID = strings.TrimSpace(sessionID)
-		rememberResolvedSessionID(llmReq, sessionID)
-		return sessionID
-	}
 	if llmReq.TransformerMetadata != nil {
 		if sessionID, ok := llmReq.TransformerMetadata[resolvedSessionIDMetadataKey].(string); ok && sessionID != "" {
 			return sessionID
 		}
 	} else {
 		llmReq.TransformerMetadata = map[string]any{}
+	}
+	if llmReq.RawRequest != nil && llmReq.RawRequest.TransformerMetadata != nil {
+		if sessionID, ok := llmReq.RawRequest.TransformerMetadata[resolvedSessionIDMetadataKey].(string); ok && sessionID != "" {
+			rememberResolvedSessionID(llmReq, sessionID)
+			return sessionID
+		}
+	}
+	if sessionID, ok := shared.GetSessionID(ctx); ok && strings.TrimSpace(sessionID) != "" {
+		sessionID = strings.TrimSpace(sessionID)
+		rememberResolvedSessionID(llmReq, sessionID)
+		return sessionID
 	}
 
 	sessionID := uuid.NewString()
@@ -201,11 +214,21 @@ func rememberResolvedSessionID(llmReq *llm.Request, sessionID string) {
 	}
 	llmReq.TransformerMetadata[resolvedSessionIDMetadataKey] = sessionID
 	if llmReq.RawRequest != nil {
-		if llmReq.RawRequest.Headers == nil {
-			llmReq.RawRequest.Headers = make(http.Header)
+		if llmReq.RawRequest.TransformerMetadata == nil {
+			llmReq.RawRequest.TransformerMetadata = map[string]any{}
 		}
-		llmReq.RawRequest.Headers.Set(SessionHeaderHyphen, sessionID)
+		llmReq.RawRequest.TransformerMetadata[resolvedSessionIDMetadataKey] = sessionID
 	}
+}
+
+func rememberProviderRequestSessionID(request *httpclient.Request, sessionID string) {
+	if request == nil || sessionID == "" {
+		return
+	}
+	if request.TransformerMetadata == nil {
+		request.TransformerMetadata = map[string]any{}
+	}
+	request.TransformerMetadata[resolvedSessionIDMetadataKey] = sessionID
 }
 
 // turnStartedAtUnixMS returns a deterministic per-session timestamp inside the

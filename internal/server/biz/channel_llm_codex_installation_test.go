@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/samber/lo"
 	"github.com/stretchr/testify/require"
 
 	"github.com/looplj/axonhub/internal/ent"
@@ -18,7 +19,7 @@ func TestCodexInstallationIDs(t *testing.T) {
 
 	base.Settings = &objects.ChannelSettings{
 		OverrideCodexInstallationID: true,
-		CodexInstallationIDCount:    3,
+		CodexInstallationIDCount:    lo.ToPtr(3),
 	}
 	ids := codexInstallationIDs(base)
 	require.Len(t, ids, 3)
@@ -27,25 +28,25 @@ func TestCodexInstallationIDs(t *testing.T) {
 	other := &ent.Channel{ID: 43, CreatedAt: createdAt, Settings: base.Settings}
 	require.NotEqual(t, ids, codexInstallationIDs(other))
 
-	base.Settings.CodexInstallationIDCount = 10
+	base.Settings.CodexInstallationIDCount = lo.ToPtr(10)
 	require.Len(t, codexInstallationIDs(base), objects.MaxCodexInstallationIDCount)
 }
 
 func TestValidateCodexInstallationIDSettings(t *testing.T) {
 	require.NoError(t, ValidateCodexInstallationIDSettings(nil))
 	require.NoError(t, ValidateCodexInstallationIDSettings(&objects.ChannelSettings{
-		CodexInstallationIDCount: 99,
+		CodexInstallationIDCount: lo.ToPtr(99),
 	}))
 	require.NoError(t, ValidateCodexInstallationIDSettings(&objects.ChannelSettings{
 		OverrideCodexInstallationID: true,
-		CodexInstallationIDCount:    1,
+		CodexInstallationIDCount:    lo.ToPtr(1),
 	}))
 	require.Error(t, ValidateCodexInstallationIDSettings(&objects.ChannelSettings{
 		OverrideCodexInstallationID: true,
-		CodexInstallationIDCount:    0,
+		CodexInstallationIDCount:    lo.ToPtr(0),
 	}))
 	require.Error(t, ValidateCodexInstallationIDSettings(&objects.ChannelSettings{
 		OverrideCodexInstallationID: true,
-		CodexInstallationIDCount:    objects.MaxCodexInstallationIDCount + 1,
+		CodexInstallationIDCount:    lo.ToPtr(objects.MaxCodexInstallationIDCount + 1),
 	}))
 }

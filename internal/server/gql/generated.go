@@ -25272,7 +25272,7 @@ func (ec *executionContext) _ChannelSettings_codexInstallationIdCount(ctx contex
 			return obj.CodexInstallationIDCount, nil
 		},
 		nil,
-		ec.marshalOInt2int,
+		ec.marshalOInt2ᚖint,
 		true,
 		false,
 	)
@@ -68749,7 +68749,7 @@ func (ec *executionContext) unmarshalInputChannelSettingsInput(ctx context.Conte
 			it.OverrideCodexInstallationID = data
 		case "codexInstallationIdCount":
 			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("codexInstallationIdCount"))
-			data, err := ec.unmarshalOInt2int(ctx, v)
+			data, err := ec.unmarshalOInt2ᚖint(ctx, v)
 			if err != nil {
 				return it, err
 			}

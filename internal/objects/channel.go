@@ -228,8 +228,8 @@ type ChannelSettings struct {
 
 	// CodexInstallationIDCount controls how many stable Codex installation IDs
 	// this channel exposes upstream when overriding is enabled. Sessions are
-	// consistently assigned to one of the IDs. Zero defaults to one.
-	CodexInstallationIDCount int `json:"codexInstallationIdCount,omitempty"`
+	// consistently assigned to one of the IDs.
+	CodexInstallationIDCount *int `json:"codexInstallationIdCount,omitempty"`
 
 	// RateLimit configures the upstream rate limit for the channel.
 	// When configured, the load balancer will skip channels that have exceeded their rate limits.

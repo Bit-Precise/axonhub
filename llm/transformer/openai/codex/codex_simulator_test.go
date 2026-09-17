@@ -182,7 +182,7 @@ func TestCodexOutbound_ReplacesMalformedClientTurnMetadata(t *testing.T) {
 	sim := newCodexSimulator(t)
 	req := newCodexChatCompletionRequest(t)
 	req.Header.Set(TurnMetadataHeader, "not-json")
-	req.Header.Set("X-Codex-Installation-Id", "client-machine-id")
+	req.Header.Set(InstallationIDHeader, "client-machine-id")
 
 	finalReq, err := sim.Simulate(context.Background(), req)
 	require.NoError(t, err)
@@ -190,7 +190,7 @@ func TestCodexOutbound_ReplacesMalformedClientTurnMetadata(t *testing.T) {
 	var metadata TurnMetadata
 	require.NoError(t, json.Unmarshal([]byte(finalReq.Header.Get(TurnMetadataHeader)), &metadata))
 	assert.Equal(t, testInstallationID, metadata.InstallationID)
-	assert.Empty(t, finalReq.Header.Get("X-Codex-Installation-Id"))
+	assert.Empty(t, finalReq.Header.Get(InstallationIDHeader))
 	assertCodexInstallationClientMetadata(t, finalReq, testInstallationID)
 }
 
@@ -283,6 +283,19 @@ func TestCodexOutbound_MissingSessionIsStableAcrossRetries(t *testing.T) {
 	)
 }
 
+func TestResolveSessionIDSurvivesRequestCopies(t *testing.T) {
+	rawRequest := &httpclient.Request{TransformerMetadata: map[string]any{}}
+	first := &llm.Request{RawRequest: rawRequest, TransformerMetadata: map[string]any{}}
+	second := &llm.Request{RawRequest: rawRequest, TransformerMetadata: map[string]any{}}
+
+	firstSessionID := resolveSessionID(t.Context(), first)
+	secondSessionID := resolveSessionID(t.Context(), second)
+
+	require.NotEmpty(t, firstSessionID)
+	require.Equal(t, firstSessionID, secondSessionID)
+	require.Empty(t, rawRequest.Headers.Get(SessionHeaderHyphen))
+}
+
 func TestCodexOutbound_OverridePreservesBodyTurnMetadata(t *testing.T) {
 	outbound, err := NewOutboundTransformer(Params{
 		TokenProvider:   staticTokenGetter{creds: &oauth.OAuthCredentials{}},
@@ -293,12 +306,14 @@ func TestCodexOutbound_OverridePreservesBodyTurnMetadata(t *testing.T) {
 	request := &httpclient.Request{
 		APIFormat: llm.APIFormatOpenAIResponse.String(),
 		Headers: http.Header{
-			SessionHeaderHyphen: {"session-1"},
-			TurnMetadataHeader:  {`{"installation_id":"client-id","session_id":"session-1","header_only":"kept"}`},
+			SessionHeaderHyphen:  {"session-1"},
+			TurnMetadataHeader:   {`{"installation_id":"client-id","session_id":"session-1","header_only":"kept"}`},
+			InstallationIDHeader: {"conflicting-client-id"},
 		},
 		Body: []byte(`{"client_metadata":{"x-codex-installation-id":"client-id","x-codex-turn-metadata":"{\"installation_id\":\"client-id\",\"session_id\":\"session-1\",\"body_only\":\"kept\"}"}}`),
 	}
 	require.NoError(t, outbound.OverrideInstallationIdentity(request))
+	require.Empty(t, request.Headers.Get(InstallationIDHeader))
 
 	var headerMetadata map[string]any
 	require.NoError(t, json.Unmarshal([]byte(request.Headers.Get(TurnMetadataHeader)), &headerMetadata))
@@ -313,6 +328,26 @@ func TestCodexOutbound_OverridePreservesBodyTurnMetadata(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(clientMetadata["x-codex-turn-metadata"].(string)), &bodyMetadata))
 	require.Equal(t, "installation-0", bodyMetadata["installation_id"])
 	require.Equal(t, "kept", bodyMetadata["body_only"])
+}
+
+func TestCodexOutbound_OverrideUsesRememberedSessionAfterHeaderDeletion(t *testing.T) {
+	outbound, err := NewOutboundTransformer(Params{
+		TokenProvider:   staticTokenGetter{creds: &oauth.OAuthCredentials{}},
+		InstallationIDs: []string{"installation-0", "installation-1"},
+	})
+	require.NoError(t, err)
+
+	sessionID := "remembered-session"
+	request := &httpclient.Request{
+		Headers:             http.Header{},
+		TransformerMetadata: map[string]any{resolvedSessionIDMetadataKey: sessionID},
+	}
+	require.NoError(t, outbound.OverrideInstallationIdentity(request))
+
+	var metadata TurnMetadata
+	require.NoError(t, json.Unmarshal([]byte(request.Headers.Get(TurnMetadataHeader)), &metadata))
+	require.Equal(t, sessionID, metadata.SessionID)
+	require.Equal(t, outbound.installationIDForSession(sessionID), metadata.InstallationID)
 }
 
 func assertCodexInstallationClientMetadata(t *testing.T, req *http.Request, expected string) {

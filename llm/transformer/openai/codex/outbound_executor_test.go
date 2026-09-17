@@ -165,7 +165,8 @@ func TestCodexOutbound_ImageGenerationRequestUsesResponsesImageTool(t *testing.T
 	accessToken := testAccessTokenWithAccountID(t)
 
 	outbound, err := NewOutboundTransformer(Params{
-		BaseURL: "https://chatgpt.com/backend-api/codex#",
+		BaseURL:         "https://chatgpt.com/backend-api/codex#",
+		InstallationIDs: []string{testInstallationID},
 		TokenProvider: staticTokenGetter{
 			creds: &oauth.OAuthCredentials{
 				AccessToken: accessToken,
@@ -216,6 +217,13 @@ func TestCodexOutbound_ImageGenerationRequestUsesResponsesImageTool(t *testing.T
 	require.Equal(t, "input_text", payload.Input.Items[0].Content.Items[0].Type)
 	require.Equal(t, "draw a circuit board city", *payload.Input.Items[0].Content.Items[0].Text)
 	require.Equal(t, "You are a helpful assistant that can generate images based on user requests. Must use the image generation tool.", payload.Instructions)
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(req.Body, &body))
+	clientMetadata := body["client_metadata"].(map[string]any)
+	require.Equal(t, testInstallationID, clientMetadata["x-codex-installation-id"])
+	var bodyTurnMetadata TurnMetadata
+	require.NoError(t, json.Unmarshal([]byte(clientMetadata["x-codex-turn-metadata"].(string)), &bodyTurnMetadata))
+	require.Equal(t, testInstallationID, bodyTurnMetadata.InstallationID)
 }
 
 func TestCodexOutbound_ImageEditRequestUsesResponsesImageTool(t *testing.T) {

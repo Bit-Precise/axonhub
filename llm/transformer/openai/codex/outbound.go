@@ -297,12 +297,14 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 	if llmReq.RawRequest != nil {
 		bodySessionID = gjson.GetBytes(llmReq.RawRequest.Body, "client_metadata.session_id").String()
 	}
-	hreq.Headers.Set(SessionHeaderHyphen, resolveSessionID(ctx, llmReq,
+	resolvedSessionID := resolveSessionID(ctx, llmReq,
 		rawSessionID,
 		ExtractSessionIDFromTurnMetadata(rawTurnMetadata),
 		bodySessionID,
 		hreq.Headers.Get(SessionHeaderHyphen),
-	))
+	)
+	hreq.Headers.Set(SessionHeaderHyphen, resolvedSessionID)
+	rememberProviderRequestSessionID(hreq, resolvedSessionID)
 
 	// Fabricate the remaining Codex identity headers for non-Codex inbound
 	// clients so the upstream always sees a complete Codex session shape.
@@ -358,7 +360,7 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 			return nil, fmt.Errorf("override codex installation identity: %w", err)
 		}
 		hreq.SkipInboundHeaderMerge = append(hreq.SkipInboundHeaderMerge,
-			"X-Codex-Installation-Id",
+			InstallationIDHeader,
 			TurnMetadataHeader,
 		)
 	}

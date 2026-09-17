@@ -385,7 +385,10 @@ func codexInstallationIDs(c *ent.Channel) []string {
 		return nil
 	}
 
-	count := c.Settings.CodexInstallationIDCount
+	count := 1
+	if c.Settings.CodexInstallationIDCount != nil {
+		count = *c.Settings.CodexInstallationIDCount
+	}
 	if count <= 0 {
 		count = 1
 	} else if count > objects.MaxCodexInstallationIDCount {

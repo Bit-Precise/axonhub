@@ -105,11 +105,12 @@ func (t *OutboundTransformer) transformAlphaSearchRequest(ctx context.Context, l
 		RequestType: llm.RequestTypeAlphaSearch.String(),
 		APIFormat:   llm.APIFormatOpenAIAlphaSearch.String(),
 	}
+	rememberProviderRequestSessionID(request, sessionID)
 	if len(t.installationIDs) > 0 {
 		if err := t.OverrideInstallationIdentity(request); err != nil {
 			return nil, err
 		}
-		request.SkipInboundHeaderMerge = []string{"X-Codex-Installation-Id", TurnMetadataHeader}
+		request.SkipInboundHeaderMerge = []string{InstallationIDHeader, TurnMetadataHeader}
 	}
 
 	return request, nil

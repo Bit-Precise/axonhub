@@ -703,9 +703,15 @@ func ValidateCodexInstallationIDSettings(settings *objects.ChannelSettings) erro
 	if settings == nil || !settings.OverrideCodexInstallationID {
 		return nil
 	}
-	if settings.CodexInstallationIDCount < 1 || settings.CodexInstallationIDCount > objects.MaxCodexInstallationIDCount {
+	if settings.CodexInstallationIDCount == nil ||
+		*settings.CodexInstallationIDCount < 1 ||
+		*settings.CodexInstallationIDCount > objects.MaxCodexInstallationIDCount {
+		count := 0
+		if settings.CodexInstallationIDCount != nil {
+			count = *settings.CodexInstallationIDCount
+		}
 		return fmt.Errorf("invalid Codex installation ID count %d: must be between 1 and %d",
-			settings.CodexInstallationIDCount, objects.MaxCodexInstallationIDCount)
+			count, objects.MaxCodexInstallationIDCount)
 	}
 
 	return nil

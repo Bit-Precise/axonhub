@@ -1,12 +1,21 @@
 package codex
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
+
+	"github.com/looplj/axonhub/llm"
+	"github.com/looplj/axonhub/llm/httpclient"
+	"github.com/looplj/axonhub/llm/transformer/shared"
 )
 
 const (
@@ -61,6 +70,142 @@ func ExtractSessionIDFromTurnMetadata(raw string) string {
 	}
 
 	return strings.TrimSpace(payload.SessionID)
+}
+
+// NormalizeTurnMetadataInstallationID replaces the machine-specific
+// installation_id while preserving the rest of the client's metadata. Invalid
+// or non-object JSON is reported to the caller so it can be replaced with a
+// valid AxonHub-generated envelope.
+func NormalizeTurnMetadataInstallationID(raw, installationID string) (string, bool) {
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil || payload == nil {
+		return "", false
+	}
+
+	payload["installation_id"] = installationID
+	normalized, err := json.Marshal(payload)
+	if err != nil {
+		return "", false
+	}
+
+	return string(normalized), true
+}
+
+func installationIDForAccount(accountID string) string {
+	accountID = strings.TrimSpace(accountID)
+	if accountID == "" {
+		return ""
+	}
+
+	return uuid.NewSHA1(uuid.NameSpaceOID, []byte(accountID)).String()
+}
+
+func (t *OutboundTransformer) installationIDForSession(sessionID string) string {
+	if t == nil || len(t.installationIDs) == 0 {
+		return ""
+	}
+
+	return t.installationIDs[hashUint64(sessionID)%uint64(len(t.installationIDs))]
+}
+
+func (t *OutboundTransformer) OverrideInstallationIdentity(request *httpclient.Request) error {
+	if t == nil || request == nil || len(t.installationIDs) == 0 {
+		return nil
+	}
+	if request.Headers == nil {
+		request.Headers = make(http.Header)
+	}
+
+	sessionID := GetSessionIDFromHeaders(request.Headers)
+	if sessionID == "" {
+		sessionID = strings.TrimSpace(gjson.GetBytes(request.Body, "client_metadata.session_id").String())
+	}
+	installationID := t.installationIDForSession(sessionID)
+
+	rawHeaderMetadata := request.Headers.Get(TurnMetadataHeader)
+	headerMetadata, ok := NormalizeTurnMetadataInstallationID(rawHeaderMetadata, installationID)
+	if !ok {
+		encoded, err := json.Marshal(TurnMetadata{
+			InstallationID: installationID,
+			SessionID:      sessionID,
+			ThreadID:       sessionID,
+			TurnID:         uuid.NewString(),
+			WindowID:       request.Headers.Get(WindowIDHeader),
+			RequestKind:    "turn",
+			ThreadSource:   "user",
+			Sandbox:        "none",
+		})
+		if err != nil {
+			return err
+		}
+		headerMetadata = string(encoded)
+	}
+	request.Headers.Set(TurnMetadataHeader, headerMetadata)
+
+	if request.APIFormat != llm.APIFormatOpenAIResponse.String() || !gjson.ValidBytes(request.Body) {
+		return nil
+	}
+
+	body, err := sjson.SetBytes(request.Body, "client_metadata.x-codex-installation-id", installationID)
+	if err != nil {
+		return err
+	}
+	bodyMetadataRaw := gjson.GetBytes(body, "client_metadata.x-codex-turn-metadata").String()
+	bodyMetadata, ok := NormalizeTurnMetadataInstallationID(bodyMetadataRaw, installationID)
+	if !ok {
+		bodyMetadata = headerMetadata
+	}
+	body, err = sjson.SetBytes(body, "client_metadata.x-codex-turn-metadata", bodyMetadata)
+	if err != nil {
+		return err
+	}
+	request.Body = body
+
+	return nil
+}
+
+const resolvedSessionIDMetadataKey = "codex_resolved_session_id"
+
+func resolveSessionID(ctx context.Context, llmReq *llm.Request, candidates ...string) string {
+	for _, candidate := range candidates {
+		if candidate = strings.TrimSpace(candidate); candidate != "" {
+			rememberResolvedSessionID(llmReq, candidate)
+			return candidate
+		}
+	}
+	if sessionID, ok := shared.GetSessionID(ctx); ok && strings.TrimSpace(sessionID) != "" {
+		sessionID = strings.TrimSpace(sessionID)
+		rememberResolvedSessionID(llmReq, sessionID)
+		return sessionID
+	}
+	if llmReq.TransformerMetadata != nil {
+		if sessionID, ok := llmReq.TransformerMetadata[resolvedSessionIDMetadataKey].(string); ok && sessionID != "" {
+			return sessionID
+		}
+	} else {
+		llmReq.TransformerMetadata = map[string]any{}
+	}
+
+	sessionID := uuid.NewString()
+	rememberResolvedSessionID(llmReq, sessionID)
+
+	return sessionID
+}
+
+func rememberResolvedSessionID(llmReq *llm.Request, sessionID string) {
+	if llmReq == nil || sessionID == "" {
+		return
+	}
+	if llmReq.TransformerMetadata == nil {
+		llmReq.TransformerMetadata = map[string]any{}
+	}
+	llmReq.TransformerMetadata[resolvedSessionIDMetadataKey] = sessionID
+	if llmReq.RawRequest != nil {
+		if llmReq.RawRequest.Headers == nil {
+			llmReq.RawRequest.Headers = make(http.Header)
+		}
+		llmReq.RawRequest.Headers.Set(SessionHeaderHyphen, sessionID)
+	}
 }
 
 // turnStartedAtUnixMS returns a deterministic per-session timestamp inside the

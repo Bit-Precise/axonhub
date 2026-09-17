@@ -269,7 +269,23 @@ func MergeInboundRequest(dest, src *Request) *Request {
 		return dest
 	}
 
-	dest.Headers = MergeHTTPHeaders(dest.Headers, src.Headers)
+	if len(dest.SkipInboundHeaderMerge) == 0 {
+		dest.Headers = MergeHTTPHeaders(dest.Headers, src.Headers)
+	} else {
+		excluded := make(map[string]struct{}, len(dest.SkipInboundHeaderMerge))
+		for _, header := range dest.SkipInboundHeaderMerge {
+			excluded[http.CanonicalHeaderKey(header)] = struct{}{}
+		}
+
+		filtered := make(http.Header, len(src.Headers))
+		for header, values := range src.Headers {
+			if _, ok := excluded[http.CanonicalHeaderKey(header)]; ok {
+				continue
+			}
+			filtered[header] = values
+		}
+		dest.Headers = MergeHTTPHeaders(dest.Headers, filtered)
+	}
 
 	if !dest.SkipInboundQueryMerge {
 		dest.Query = MergeHTTPQuery(dest.Query, src.Query)

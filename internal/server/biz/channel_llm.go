@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/looplj/axonhub/internal/ent"
 	"github.com/looplj/axonhub/internal/ent/channel"
 	"github.com/looplj/axonhub/internal/log"
@@ -307,6 +309,7 @@ func (svc *ChannelService) buildCodexOutbound(
 	alphaSearchPath string,
 	httpClient *httpclient.HttpClient,
 ) (transformer.Outbound, error) {
+	installationIDs := codexInstallationIDs(c)
 	if c.Credentials.IsOAuth() {
 		if ch != nil {
 			if existing, ok := ch.Outbound.(*codex.OutboundTransformer); ok {
@@ -316,6 +319,7 @@ func (svc *ChannelService) buildCodexOutbound(
 						BaseURL:         baseURL,
 						Transport:       transport,
 						AlphaSearchPath: alphaSearchPath,
+						InstallationIDs: installationIDs,
 					})
 				}
 			}
@@ -360,6 +364,7 @@ func (svc *ChannelService) buildCodexOutbound(
 			BaseURL:         baseURL,
 			Transport:       transport,
 			AlphaSearchPath: alphaSearchPath,
+			InstallationIDs: installationIDs,
 		})
 	}
 
@@ -371,7 +376,33 @@ func (svc *ChannelService) buildCodexOutbound(
 		BaseURL:         baseURL,
 		Transport:       transport,
 		AlphaSearchPath: alphaSearchPath,
+		InstallationIDs: installationIDs,
 	})
+}
+
+func codexInstallationIDs(c *ent.Channel) []string {
+	if c.Settings == nil || !c.Settings.OverrideCodexInstallationID {
+		return nil
+	}
+
+	count := c.Settings.CodexInstallationIDCount
+	if count <= 0 {
+		count = 1
+	} else if count > objects.MaxCodexInstallationIDCount {
+		count = objects.MaxCodexInstallationIDCount
+	}
+
+	channelIdentity := fmt.Sprintf("axonhub:channel:%d:%d", c.ID, c.CreatedAt.UnixNano())
+	installationIDs := make([]string, count)
+	for slot := range count {
+		identity := channelIdentity
+		if slot > 0 {
+			identity = fmt.Sprintf("%s:slot:%d", channelIdentity, slot)
+		}
+		installationIDs[slot] = uuid.NewSHA1(uuid.NameSpaceURL, []byte(identity)).String()
+	}
+
+	return installationIDs
 }
 
 // buildNonDefaultEndpointOutbound creates a transformer for a user-configured

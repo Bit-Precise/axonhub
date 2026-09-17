@@ -12,7 +12,6 @@ import (
 
 	"github.com/looplj/axonhub/llm"
 	"github.com/looplj/axonhub/llm/httpclient"
-	"github.com/looplj/axonhub/llm/transformer/shared"
 )
 
 var ErrAlphaSearchRequest = errors.New("invalid alpha search request")
@@ -36,22 +35,11 @@ func (t *OutboundTransformer) transformAlphaSearchRequest(ctx context.Context, l
 	if llmReq.RawRequest != nil && llmReq.RawRequest.Headers != nil {
 		rawHeaders = llmReq.RawRequest.Headers
 	}
-	sessionID := GetSessionIDFromHeaders(rawHeaders)
-	if sessionID == "" {
-		var envelope struct {
-			ID string `json:"id"`
-		}
-		if json.Unmarshal(llmReq.AlphaSearch.Body, &envelope) == nil {
-			sessionID = strings.TrimSpace(envelope.ID)
-		}
+	var envelope struct {
+		ID string `json:"id"`
 	}
-	if sessionID == "" {
-		if value, ok := shared.GetSessionID(ctx); ok {
-			sessionID = value
-		} else {
-			sessionID = uuid.NewString()
-		}
-	}
+	_ = json.Unmarshal(llmReq.AlphaSearch.Body, &envelope)
+	sessionID := resolveSessionID(ctx, llmReq, GetSessionIDFromHeaders(rawHeaders), envelope.ID)
 
 	headers := make(http.Header)
 	headers.Set("Content-Type", "application/json")
@@ -85,10 +73,7 @@ func (t *OutboundTransformer) transformAlphaSearchRequest(ctx context.Context, l
 		headers.Set(BetaFeaturesHeader, fabricatedBetaFeatures)
 	}
 	if headers.Get(TurnMetadataHeader) == "" {
-		installationID := ""
-		if accountID != "" {
-			installationID = uuid.NewSHA1(uuid.NameSpaceOID, []byte(accountID)).String()
-		}
+		installationID := installationIDForAccount(accountID)
 		metadata := TurnMetadata{
 			InstallationID: installationID,
 			SessionID:      sessionID,
@@ -111,7 +96,7 @@ func (t *OutboundTransformer) transformAlphaSearchRequest(ctx context.Context, l
 	}
 
 	baseURL := strings.TrimRight(t.baseURL, "#/")
-	return &httpclient.Request{
+	request := &httpclient.Request{
 		Method:      http.MethodPost,
 		URL:         baseURL + t.alphaSearchPath,
 		Headers:     headers,
@@ -119,7 +104,15 @@ func (t *OutboundTransformer) transformAlphaSearchRequest(ctx context.Context, l
 		Auth:        &httpclient.AuthConfig{Type: httpclient.AuthTypeBearer, APIKey: creds.AccessToken},
 		RequestType: llm.RequestTypeAlphaSearch.String(),
 		APIFormat:   llm.APIFormatOpenAIAlphaSearch.String(),
-	}, nil
+	}
+	if len(t.installationIDs) > 0 {
+		if err := t.OverrideInstallationIdentity(request); err != nil {
+			return nil, err
+		}
+		request.SkipInboundHeaderMerge = []string{"X-Codex-Installation-Id", TurnMetadataHeader}
+	}
+
+	return request, nil
 }
 
 func (t *OutboundTransformer) transformAlphaSearchResponse(ctx context.Context, resp *httpclient.Response) (*llm.Response, error) {

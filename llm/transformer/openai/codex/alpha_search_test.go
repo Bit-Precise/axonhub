@@ -89,7 +89,8 @@ func newAlphaSearchTestTransformer(t *testing.T) *OutboundTransformer {
 	t.Helper()
 
 	outbound, err := NewOutboundTransformer(Params{
-		BaseURL: "https://chatgpt.com/backend-api/codex#",
+		BaseURL:         "https://chatgpt.com/backend-api/codex#",
+		InstallationIDs: []string{testInstallationID},
 		TokenProvider: staticTokenGetter{creds: &oauth.OAuthCredentials{
 			AccessToken: testAccessTokenWithAccountID(t),
 			ExpiresAt:   time.Now().Add(time.Hour),

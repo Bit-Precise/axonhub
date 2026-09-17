@@ -838,3 +838,25 @@ func finalizeTransportRequest(p *PersistentOutboundTransformer) pipeline.Middlew
 		return finalizer.FinalizeTransportRequest(request), nil
 	})
 }
+
+type installationIdentityOverrider interface {
+	OverrideInstallationIdentity(request *httpclient.Request) error
+}
+
+func overrideInstallationIdentity(p *PersistentOutboundTransformer) pipeline.Middleware {
+	return pipeline.OnRawRequest("override_installation_identity", func(_ context.Context, request *httpclient.Request) (*httpclient.Request, error) {
+		if p == nil || p.wrapped == nil {
+			return request, nil
+		}
+
+		overrider, ok := p.wrapped.(installationIdentityOverrider)
+		if !ok {
+			return request, nil
+		}
+		if err := overrider.OverrideInstallationIdentity(request); err != nil {
+			return nil, fmt.Errorf("override installation identity: %w", err)
+		}
+
+		return request, nil
+	})
+}

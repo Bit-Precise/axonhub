@@ -564,23 +564,25 @@ type ComplexityRoot struct {
 	}
 
 	ChannelSettings struct {
-		AutoTrimedModelPrefixes  func(childComplexity int) int
-		BodyOverrideOperations   func(childComplexity int) int
-		ExtraModelPrefix         func(childComplexity int) int
-		HeaderOverrideOperations func(childComplexity int) int
-		HideMappedModels         func(childComplexity int) int
-		HideOriginalModels       func(childComplexity int) int
-		LowercaseModelID         func(childComplexity int) int
-		ModelMappings            func(childComplexity int) int
-		ModelProtocols           func(childComplexity int) int
-		PassThroughBody          func(childComplexity int) int
-		PassThroughUserAgent     func(childComplexity int) int
-		ProviderQuota            func(childComplexity int) int
-		Proxy                    func(childComplexity int) int
-		RateLimit                func(childComplexity int) int
-		RetryableErrorPatterns   func(childComplexity int) int
-		RetryableStatusCodes     func(childComplexity int) int
-		TransformOptions         func(childComplexity int) int
+		AutoTrimedModelPrefixes     func(childComplexity int) int
+		BodyOverrideOperations      func(childComplexity int) int
+		CodexInstallationIDCount    func(childComplexity int) int
+		ExtraModelPrefix            func(childComplexity int) int
+		HeaderOverrideOperations    func(childComplexity int) int
+		HideMappedModels            func(childComplexity int) int
+		HideOriginalModels          func(childComplexity int) int
+		LowercaseModelID            func(childComplexity int) int
+		ModelMappings               func(childComplexity int) int
+		ModelProtocols              func(childComplexity int) int
+		OverrideCodexInstallationID func(childComplexity int) int
+		PassThroughBody             func(childComplexity int) int
+		PassThroughUserAgent        func(childComplexity int) int
+		ProviderQuota               func(childComplexity int) int
+		Proxy                       func(childComplexity int) int
+		RateLimit                   func(childComplexity int) int
+		RetryableErrorPatterns      func(childComplexity int) int
+		RetryableStatusCodes        func(childComplexity int) int
+		TransformOptions            func(childComplexity int) int
 	}
 
 	ChannelSuccessRate struct {
@@ -4335,6 +4337,12 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.complexity.ChannelSettings.BodyOverrideOperations(childComplexity), true
+	case "ChannelSettings.codexInstallationIdCount":
+		if e.complexity.ChannelSettings.CodexInstallationIDCount == nil {
+			break
+		}
+
+		return e.complexity.ChannelSettings.CodexInstallationIDCount(childComplexity), true
 	case "ChannelSettings.extraModelPrefix":
 		if e.complexity.ChannelSettings.ExtraModelPrefix == nil {
 			break
@@ -4377,6 +4385,12 @@ func (e *executableSchema) Complexity(ctx context.Context, typeName, field strin
 		}
 
 		return e.complexity.ChannelSettings.ModelProtocols(childComplexity), true
+	case "ChannelSettings.overrideCodexInstallationId":
+		if e.complexity.ChannelSettings.OverrideCodexInstallationID == nil {
+			break
+		}
+
+		return e.complexity.ChannelSettings.OverrideCodexInstallationID(childComplexity), true
 	case "ChannelSettings.passThroughBody":
 		if e.complexity.ChannelSettings.PassThroughBody == nil {
 			break
@@ -20625,6 +20639,10 @@ func (ec *executionContext) fieldContext_Channel_settings(_ context.Context, fie
 				return ec.fieldContext_ChannelSettings_passThroughUserAgent(ctx, field)
 			case "passThroughBody":
 				return ec.fieldContext_ChannelSettings_passThroughBody(ctx, field)
+			case "overrideCodexInstallationId":
+				return ec.fieldContext_ChannelSettings_overrideCodexInstallationId(ctx, field)
+			case "codexInstallationIdCount":
+				return ec.fieldContext_ChannelSettings_codexInstallationIdCount(ctx, field)
 			case "rateLimit":
 				return ec.fieldContext_ChannelSettings_rateLimit(ctx, field)
 			case "retryableStatusCodes":
@@ -25210,6 +25228,64 @@ func (ec *executionContext) fieldContext_ChannelSettings_passThroughBody(_ conte
 		IsResolver: false,
 		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
 			return nil, errors.New("field of type Boolean does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _ChannelSettings_overrideCodexInstallationId(ctx context.Context, field graphql.CollectedField, obj *objects.ChannelSettings) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_ChannelSettings_overrideCodexInstallationId,
+		func(ctx context.Context) (any, error) {
+			return obj.OverrideCodexInstallationID, nil
+		},
+		nil,
+		ec.marshalOBoolean2bool,
+		true,
+		false,
+	)
+}
+
+func (ec *executionContext) fieldContext_ChannelSettings_overrideCodexInstallationId(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "ChannelSettings",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type Boolean does not have child fields")
+		},
+	}
+	return fc, nil
+}
+
+func (ec *executionContext) _ChannelSettings_codexInstallationIdCount(ctx context.Context, field graphql.CollectedField, obj *objects.ChannelSettings) (ret graphql.Marshaler) {
+	return graphql.ResolveField(
+		ctx,
+		ec.OperationContext,
+		field,
+		ec.fieldContext_ChannelSettings_codexInstallationIdCount,
+		func(ctx context.Context) (any, error) {
+			return obj.CodexInstallationIDCount, nil
+		},
+		nil,
+		ec.marshalOInt2int,
+		true,
+		false,
+	)
+}
+
+func (ec *executionContext) fieldContext_ChannelSettings_codexInstallationIdCount(_ context.Context, field graphql.CollectedField) (fc *graphql.FieldContext, err error) {
+	fc = &graphql.FieldContext{
+		Object:     "ChannelSettings",
+		Field:      field,
+		IsMethod:   false,
+		IsResolver: false,
+		Child: func(ctx context.Context, field graphql.CollectedField) (*graphql.FieldContext, error) {
+			return nil, errors.New("field of type Int does not have child fields")
 		},
 	}
 	return fc, nil
@@ -68573,7 +68649,7 @@ func (ec *executionContext) unmarshalInputChannelSettingsInput(ctx context.Conte
 		asMap[k] = v
 	}
 
-	fieldsInOrder := [...]string{"extraModelPrefix", "modelMappings", "autoTrimedModelPrefixes", "hideOriginalModels", "hideMappedModels", "lowercaseModelId", "proxy", "transformOptions", "headerOverrideOperations", "bodyOverrideOperations", "passThroughUserAgent", "passThroughBody", "rateLimit", "retryableStatusCodes", "retryableErrorPatterns", "modelProtocols", "providerQuota"}
+	fieldsInOrder := [...]string{"extraModelPrefix", "modelMappings", "autoTrimedModelPrefixes", "hideOriginalModels", "hideMappedModels", "lowercaseModelId", "proxy", "transformOptions", "headerOverrideOperations", "bodyOverrideOperations", "passThroughUserAgent", "passThroughBody", "overrideCodexInstallationId", "codexInstallationIdCount", "rateLimit", "retryableStatusCodes", "retryableErrorPatterns", "modelProtocols", "providerQuota"}
 	for _, k := range fieldsInOrder {
 		v, ok := asMap[k]
 		if !ok {
@@ -68664,6 +68740,20 @@ func (ec *executionContext) unmarshalInputChannelSettingsInput(ctx context.Conte
 				return it, err
 			}
 			it.PassThroughBody = data
+		case "overrideCodexInstallationId":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("overrideCodexInstallationId"))
+			data, err := ec.unmarshalOBoolean2bool(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.OverrideCodexInstallationID = data
+		case "codexInstallationIdCount":
+			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("codexInstallationIdCount"))
+			data, err := ec.unmarshalOInt2int(ctx, v)
+			if err != nil {
+				return it, err
+			}
+			it.CodexInstallationIDCount = data
 		case "rateLimit":
 			ctx := graphql.WithPathContext(ctx, graphql.NewPathWithField("rateLimit"))
 			data, err := ec.unmarshalOChannelRateLimitInput2ᚖgithubᚗcomᚋloopljᚋaxonhubᚋinternalᚋobjectsᚐChannelRateLimit(ctx, v)
@@ -95015,6 +95105,10 @@ func (ec *executionContext) _ChannelSettings(ctx context.Context, sel ast.Select
 			out.Values[i] = ec._ChannelSettings_passThroughUserAgent(ctx, field, obj)
 		case "passThroughBody":
 			out.Values[i] = ec._ChannelSettings_passThroughBody(ctx, field, obj)
+		case "overrideCodexInstallationId":
+			out.Values[i] = ec._ChannelSettings_overrideCodexInstallationId(ctx, field, obj)
+		case "codexInstallationIdCount":
+			out.Values[i] = ec._ChannelSettings_codexInstallationIdCount(ctx, field, obj)
 		case "rateLimit":
 			out.Values[i] = ec._ChannelSettings_rateLimit(ctx, field, obj)
 		case "retryableStatusCodes":

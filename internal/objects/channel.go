@@ -222,6 +222,15 @@ type ChannelSettings struct {
 	// When set to true/false, it overrides the global setting.
 	PassThroughBody *bool `json:"passThroughBody,omitempty"`
 
+	// OverrideCodexInstallationID controls whether AxonHub replaces downstream
+	// Codex installation IDs with a channel-scoped identity pool.
+	OverrideCodexInstallationID bool `json:"overrideCodexInstallationId,omitempty"`
+
+	// CodexInstallationIDCount controls how many stable Codex installation IDs
+	// this channel exposes upstream when overriding is enabled. Sessions are
+	// consistently assigned to one of the IDs. Zero defaults to one.
+	CodexInstallationIDCount int `json:"codexInstallationIdCount,omitempty"`
+
 	// RateLimit configures the upstream rate limit for the channel.
 	// When configured, the load balancer will skip channels that have exceeded their rate limits.
 	RateLimit *ChannelRateLimit `json:"rateLimit,omitempty"`
@@ -247,6 +256,8 @@ type ChannelSettings struct {
 	// operators holding channel write permission.
 	ProviderQuota *ChannelProviderQuotaSettings `json:"providerQuota,omitempty"`
 }
+
+const MaxCodexInstallationIDCount = 5
 
 // ChannelProviderQuotaSettings groups per-provider quota collection settings.
 type ChannelProviderQuotaSettings struct {

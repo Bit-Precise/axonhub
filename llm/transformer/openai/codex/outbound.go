@@ -24,7 +24,6 @@ import (
 	"github.com/looplj/axonhub/llm/streams"
 	"github.com/looplj/axonhub/llm/transformer"
 	"github.com/looplj/axonhub/llm/transformer/openai/responses"
-	"github.com/looplj/axonhub/llm/transformer/shared"
 )
 
 const (
@@ -43,6 +42,7 @@ type OutboundTransformer struct {
 	transport       string
 	baseURL         string
 	alphaSearchPath string
+	installationIDs []string
 
 	// official reports whether the configured upstream is the official Codex
 	// backend (chatgpt.com). Official endpoints always stream SSE, so they keep
@@ -74,6 +74,9 @@ type Params struct {
 	BaseURL         string
 	Transport       string
 	AlphaSearchPath string
+	// InstallationIDs is the stable channel-scoped identity pool. An empty pool
+	// preserves the downstream installation identity.
+	InstallationIDs []string
 }
 
 // isOfficialCodexBaseURL reports whether baseURL points at the official Codex
@@ -102,7 +105,6 @@ func NewOutboundTransformer(params Params) (*OutboundTransformer, error) {
 	if alphaSearchPath == "" {
 		alphaSearchPath = "/alpha/search"
 	}
-
 	// The underlying responses outbound requires baseURL/apiKey. We only need its request body logic.
 	// Use a dummy config and then override URL/auth.
 	ro, err := responses.NewOutboundTransformerWithConfig(&responses.Config{
@@ -119,6 +121,7 @@ func NewOutboundTransformer(params Params) (*OutboundTransformer, error) {
 		transport:         params.Transport,
 		baseURL:           strings.TrimSuffix(baseURL, "##"),
 		alphaSearchPath:   alphaSearchPath,
+		installationIDs:   params.InstallationIDs,
 		official:          isOfficialCodexBaseURL(baseURL),
 		responsesOutbound: ro,
 	}, nil
@@ -195,7 +198,6 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 		return nil, err
 	}
 
-	// Parse account ID from access token JWT.
 	accountID := ExtractChatGPTAccountIDFromJWT(creds.AccessToken)
 
 	// Clone request so we do not mutate upstream pipeline state.
@@ -291,17 +293,16 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 		}
 	}
 
-	if rawSessionID != "" {
-		hreq.Headers.Set(SessionHeaderHyphen, rawSessionID)
-	} else if sessionID := ExtractSessionIDFromTurnMetadata(rawTurnMetadata); sessionID != "" {
-		hreq.Headers.Set(SessionHeaderHyphen, sessionID)
-	} else if hreq.Headers.Get(SessionHeaderHyphen) == "" {
-		if sessionID, ok := shared.GetSessionID(ctx); ok {
-			hreq.Headers.Set(SessionHeaderHyphen, sessionID)
-		} else {
-			hreq.Headers.Set(SessionHeaderHyphen, uuid.NewString())
-		}
+	bodySessionID := ""
+	if llmReq.RawRequest != nil {
+		bodySessionID = gjson.GetBytes(llmReq.RawRequest.Body, "client_metadata.session_id").String()
 	}
+	hreq.Headers.Set(SessionHeaderHyphen, resolveSessionID(ctx, llmReq,
+		rawSessionID,
+		ExtractSessionIDFromTurnMetadata(rawTurnMetadata),
+		bodySessionID,
+		hreq.Headers.Get(SessionHeaderHyphen),
+	))
 
 	// Fabricate the remaining Codex identity headers for non-Codex inbound
 	// clients so the upstream always sees a complete Codex session shape.
@@ -317,12 +318,7 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 		hreq.Headers.Set(WindowIDHeader, windowID)
 	}
 	if hreq.Headers.Get(TurnMetadataHeader) == "" {
-		installationID := ""
-		if accountID != "" {
-			// Deterministic per-account installation id derived from the
-			// ChatGPT account id.
-			installationID = uuid.NewSHA1(uuid.NameSpaceOID, []byte(accountID)).String()
-		}
+		installationID := installationIDForAccount(accountID)
 		turnMetadata, _ := json.Marshal(TurnMetadata{
 			InstallationID:      installationID,
 			SessionID:           sessionID,
@@ -355,6 +351,16 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 
 	if hreq.Headers.Get("Version") == "" {
 		hreq.Headers.Set("Version", codexDefaultVersion)
+	}
+
+	if len(t.installationIDs) > 0 {
+		if err := t.OverrideInstallationIdentity(hreq); err != nil {
+			return nil, fmt.Errorf("override codex installation identity: %w", err)
+		}
+		hreq.SkipInboundHeaderMerge = append(hreq.SkipInboundHeaderMerge,
+			"X-Codex-Installation-Id",
+			TurnMetadataHeader,
+		)
 	}
 
 	return hreq, nil

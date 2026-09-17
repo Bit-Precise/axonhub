@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -25,6 +26,7 @@ type staticTokenGetter struct {
 }
 
 const testChatAccountID = "acct_test"
+const testInstallationID = "11111111-1111-4111-8111-111111111111"
 
 func (g staticTokenGetter) Get(ctx context.Context) (*oauth.OAuthCredentials, error) {
 	return g.creds, nil
@@ -89,7 +91,7 @@ func TestCodexOutbound_PassthroughModernCodexHeaders(t *testing.T) {
 	ctx := context.Background()
 	sim := newCodexSimulator(t)
 	req := newCodexChatCompletionRequest(t)
-	req.Header.Set("X-Codex-Turn-Metadata", `{"session_id":"turn-session","turn_id":"turn-123"}`)
+	req.Header.Set("X-Codex-Turn-Metadata", `{"installation_id":"client-machine-id","session_id":"turn-session","turn_id":"turn-123"}`)
 	req.Header.Set("X-Codex-Window-Id", "window-123")
 	req.Header.Set("X-Client-Request-Id", "request-123")
 	req.Header.Set("X-Codex-Beta-Features", "js_repl")
@@ -99,12 +101,17 @@ func TestCodexOutbound_PassthroughModernCodexHeaders(t *testing.T) {
 	finalReq, err := sim.Simulate(ctx, req)
 	require.NoError(t, err)
 
-	assert.Equal(t, `{"session_id":"turn-session","turn_id":"turn-123"}`, finalReq.Header.Get("X-Codex-Turn-Metadata"))
+	var turnMetadata TurnMetadata
+	require.NoError(t, json.Unmarshal([]byte(finalReq.Header.Get("X-Codex-Turn-Metadata")), &turnMetadata))
+	assert.Equal(t, testInstallationID, turnMetadata.InstallationID)
+	assert.Equal(t, "turn-session", turnMetadata.SessionID)
+	assert.Equal(t, "turn-123", turnMetadata.TurnID)
 	assert.Equal(t, "window-123", finalReq.Header.Get("X-Codex-Window-Id"))
 	assert.Equal(t, "request-123", finalReq.Header.Get("X-Client-Request-Id"))
 	assert.Equal(t, "js_repl", finalReq.Header.Get("X-Codex-Beta-Features"))
 	assert.Equal(t, "thread-123", finalReq.Header.Get("Thread-Id"))
 	assert.Equal(t, "true", finalReq.Header.Get("X-Openai-Internal-Codex-Responses-Lite"))
+	assertCodexInstallationClientMetadata(t, finalReq, testInstallationID)
 }
 
 func TestCodexOutbound_NonCodexInboundDefaults(t *testing.T) {
@@ -138,8 +145,8 @@ func TestCodexOutbound_NonCodexInboundDefaults(t *testing.T) {
 
 	var turnMetadata TurnMetadata
 	require.NoError(t, json.Unmarshal([]byte(finalReq.Header.Get("X-Codex-Turn-Metadata")), &turnMetadata))
-	// installation_id is deterministically derived from the ChatGPT account id.
-	assert.Equal(t, uuid.NewSHA1(uuid.NameSpaceOID, []byte(testChatAccountID)).String(), turnMetadata.InstallationID)
+	assert.Equal(t, testInstallationID, turnMetadata.InstallationID)
+	assertCodexInstallationClientMetadata(t, finalReq, testInstallationID)
 	assert.Equal(t, sessionID, turnMetadata.SessionID)
 	assert.Equal(t, sessionID, turnMetadata.ThreadID)
 	assert.Equal(t, windowID, turnMetadata.WindowID)
@@ -166,6 +173,40 @@ func TestCodexOutbound_NonCodexInboundDefaults(t *testing.T) {
 	var turnMetadata2 TurnMetadata
 	require.NoError(t, json.Unmarshal([]byte(finalReq2.Header.Get("X-Codex-Turn-Metadata")), &turnMetadata2))
 	assert.Equal(t, turnMetadata.TurnStartedAtUnixMS, turnMetadata2.TurnStartedAtUnixMS)
+}
+
+func TestCodexOutbound_ReplacesMalformedClientTurnMetadata(t *testing.T) {
+	sim := newCodexSimulator(t)
+	req := newCodexChatCompletionRequest(t)
+	req.Header.Set(TurnMetadataHeader, "not-json")
+	req.Header.Set("X-Codex-Installation-Id", "client-machine-id")
+
+	finalReq, err := sim.Simulate(context.Background(), req)
+	require.NoError(t, err)
+
+	var metadata TurnMetadata
+	require.NoError(t, json.Unmarshal([]byte(finalReq.Header.Get(TurnMetadataHeader)), &metadata))
+	assert.Equal(t, testInstallationID, metadata.InstallationID)
+	assert.Empty(t, finalReq.Header.Get("X-Codex-Installation-Id"))
+	assertCodexInstallationClientMetadata(t, finalReq, testInstallationID)
+}
+
+func assertCodexInstallationClientMetadata(t *testing.T, req *http.Request, expected string) {
+	t.Helper()
+
+	body, err := io.ReadAll(req.Body)
+	require.NoError(t, err)
+	req.Body = io.NopCloser(bytes.NewReader(body))
+
+	var payload struct {
+		ClientMetadata map[string]string `json:"client_metadata"`
+	}
+	require.NoError(t, json.Unmarshal(body, &payload))
+	assert.Equal(t, expected, payload.ClientMetadata["x-codex-installation-id"])
+
+	var metadata TurnMetadata
+	require.NoError(t, json.Unmarshal([]byte(payload.ClientMetadata["x-codex-turn-metadata"]), &metadata))
+	assert.Equal(t, expected, metadata.InstallationID)
 }
 
 func TestCodexOutbound_SessionIDPrecedence(t *testing.T) {
@@ -262,6 +303,7 @@ func newCodexSimulatorWithToken(t *testing.T, accessToken string) *simulator.Sim
 
 	inbound := openai.NewInboundTransformer()
 	outbound, err := NewOutboundTransformer(Params{
+		InstallationID: testInstallationID,
 		TokenProvider: staticTokenGetter{
 			creds: &oauth.OAuthCredentials{
 				AccessToken: accessToken,

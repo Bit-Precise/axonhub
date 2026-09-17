@@ -63,6 +63,25 @@ func ExtractSessionIDFromTurnMetadata(raw string) string {
 	return strings.TrimSpace(payload.SessionID)
 }
 
+// NormalizeTurnMetadataInstallationID replaces the machine-specific
+// installation_id while preserving the rest of the client's metadata. Invalid
+// or non-object JSON is reported to the caller so it can be replaced with a
+// valid AxonHub-generated envelope.
+func NormalizeTurnMetadataInstallationID(raw, installationID string) (string, bool) {
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil || payload == nil {
+		return "", false
+	}
+
+	payload["installation_id"] = installationID
+	normalized, err := json.Marshal(payload)
+	if err != nil {
+		return "", false
+	}
+
+	return string(normalized), true
+}
+
 // turnStartedAtUnixMS returns a deterministic per-session timestamp inside the
 // current 10-minute bucket: the bucket start plus an offset derived from the
 // session id. Fabricated turn metadata is therefore stable across requests of

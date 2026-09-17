@@ -57,6 +57,14 @@ func (t *OutboundTransformer) transformAlphaSearchRequest(ctx context.Context, l
 	headers.Set("Content-Type", "application/json")
 	headers.Set("Accept", "application/json")
 	for _, name := range PassthroughHeaders {
+		if name == TurnMetadataHeader {
+			raw := rawHeaders.Get(name)
+			if normalized, ok := NormalizeTurnMetadataInstallationID(raw, t.installationID); ok {
+				headers.Set(name, normalized)
+			}
+
+			continue
+		}
 		for _, value := range rawHeaders.Values(name) {
 			headers.Add(name, value)
 		}
@@ -85,12 +93,8 @@ func (t *OutboundTransformer) transformAlphaSearchRequest(ctx context.Context, l
 		headers.Set(BetaFeaturesHeader, fabricatedBetaFeatures)
 	}
 	if headers.Get(TurnMetadataHeader) == "" {
-		installationID := ""
-		if accountID != "" {
-			installationID = uuid.NewSHA1(uuid.NameSpaceOID, []byte(accountID)).String()
-		}
 		metadata := TurnMetadata{
-			InstallationID: installationID,
+			InstallationID: t.installationID,
 			SessionID:      sessionID,
 			ThreadID:       sessionID,
 			TurnID:         uuid.NewString(),
@@ -102,6 +106,9 @@ func (t *OutboundTransformer) transformAlphaSearchRequest(ctx context.Context, l
 		if encoded, marshalErr := json.Marshal(metadata); marshalErr == nil {
 			headers.Set(TurnMetadataHeader, string(encoded))
 		}
+	}
+	if normalized, ok := NormalizeTurnMetadataInstallationID(headers.Get(TurnMetadataHeader), t.installationID); ok {
+		headers.Set(TurnMetadataHeader, normalized)
 	}
 	if accountID != "" {
 		headers.Set("Chatgpt-Account-Id", accountID)
@@ -119,6 +126,10 @@ func (t *OutboundTransformer) transformAlphaSearchRequest(ctx context.Context, l
 		Auth:        &httpclient.AuthConfig{Type: httpclient.AuthTypeBearer, APIKey: creds.AccessToken},
 		RequestType: llm.RequestTypeAlphaSearch.String(),
 		APIFormat:   llm.APIFormatOpenAIAlphaSearch.String(),
+		SkipInboundHeaderMerge: []string{
+			"X-Codex-Installation-Id",
+			TurnMetadataHeader,
+		},
 	}, nil
 }
 

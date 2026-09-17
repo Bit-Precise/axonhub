@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/looplj/axonhub/internal/ent"
 	"github.com/looplj/axonhub/internal/ent/channel"
 	"github.com/looplj/axonhub/internal/log"
@@ -307,6 +309,7 @@ func (svc *ChannelService) buildCodexOutbound(
 	alphaSearchPath string,
 	httpClient *httpclient.HttpClient,
 ) (transformer.Outbound, error) {
+	installationID := codexInstallationID(c)
 	if c.Credentials.IsOAuth() {
 		if ch != nil {
 			if existing, ok := ch.Outbound.(*codex.OutboundTransformer); ok {
@@ -316,6 +319,7 @@ func (svc *ChannelService) buildCodexOutbound(
 						BaseURL:         baseURL,
 						Transport:       transport,
 						AlphaSearchPath: alphaSearchPath,
+						InstallationID:  installationID,
 					})
 				}
 			}
@@ -360,6 +364,7 @@ func (svc *ChannelService) buildCodexOutbound(
 			BaseURL:         baseURL,
 			Transport:       transport,
 			AlphaSearchPath: alphaSearchPath,
+			InstallationID:  installationID,
 		})
 	}
 
@@ -371,7 +376,13 @@ func (svc *ChannelService) buildCodexOutbound(
 		BaseURL:         baseURL,
 		Transport:       transport,
 		AlphaSearchPath: alphaSearchPath,
+		InstallationID:  installationID,
 	})
+}
+
+func codexInstallationID(c *ent.Channel) string {
+	identity := fmt.Sprintf("axonhub:channel:%d:%d", c.ID, c.CreatedAt.UnixNano())
+	return uuid.NewSHA1(uuid.NameSpaceURL, []byte(identity)).String()
 }
 
 // buildNonDefaultEndpointOutbound creates a transformer for a user-configured

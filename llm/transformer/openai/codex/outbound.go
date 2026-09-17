@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/samber/lo"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 
 	"github.com/looplj/axonhub/llm"
 	"github.com/looplj/axonhub/llm/auth"
@@ -43,6 +44,7 @@ type OutboundTransformer struct {
 	transport       string
 	baseURL         string
 	alphaSearchPath string
+	installationID  string
 
 	// official reports whether the configured upstream is the official Codex
 	// backend (chatgpt.com). Official endpoints always stream SSE, so they keep
@@ -74,6 +76,10 @@ type Params struct {
 	BaseURL         string
 	Transport       string
 	AlphaSearchPath string
+	// InstallationID identifies the AxonHub channel as one stable Codex
+	// installation. Callers that own a persistent channel should provide a
+	// deterministic UUID; direct users fall back to one UUID per transformer.
+	InstallationID string
 }
 
 // isOfficialCodexBaseURL reports whether baseURL points at the official Codex
@@ -102,6 +108,10 @@ func NewOutboundTransformer(params Params) (*OutboundTransformer, error) {
 	if alphaSearchPath == "" {
 		alphaSearchPath = "/alpha/search"
 	}
+	installationID := strings.TrimSpace(params.InstallationID)
+	if installationID == "" {
+		installationID = uuid.NewString()
+	}
 
 	// The underlying responses outbound requires baseURL/apiKey. We only need its request body logic.
 	// Use a dummy config and then override URL/auth.
@@ -119,6 +129,7 @@ func NewOutboundTransformer(params Params) (*OutboundTransformer, error) {
 		transport:         params.Transport,
 		baseURL:           strings.TrimSuffix(baseURL, "##"),
 		alphaSearchPath:   alphaSearchPath,
+		installationID:    installationID,
 		official:          isOfficialCodexBaseURL(baseURL),
 		responsesOutbound: ro,
 	}, nil
@@ -195,8 +206,14 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 		return nil, err
 	}
 
-	// Parse account ID from access token JWT.
 	accountID := ExtractChatGPTAccountIDFromJWT(creds.AccessToken)
+	if rawTurnMetadata != "" {
+		if normalized, ok := NormalizeTurnMetadataInstallationID(rawTurnMetadata, t.installationID); ok {
+			rawTurnMetadata = normalized
+		} else {
+			rawTurnMetadata = ""
+		}
+	}
 
 	// Clone request so we do not mutate upstream pipeline state.
 	reqCopy := *llmReq
@@ -286,6 +303,13 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 	}
 
 	for _, header := range PassthroughHeaders {
+		if header == TurnMetadataHeader {
+			if rawTurnMetadata != "" {
+				hreq.Headers.Set(header, rawTurnMetadata)
+			}
+
+			continue
+		}
 		if value := rawHeaders.Get(header); value != "" {
 			hreq.Headers.Set(header, value)
 		}
@@ -317,14 +341,8 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 		hreq.Headers.Set(WindowIDHeader, windowID)
 	}
 	if hreq.Headers.Get(TurnMetadataHeader) == "" {
-		installationID := ""
-		if accountID != "" {
-			// Deterministic per-account installation id derived from the
-			// ChatGPT account id.
-			installationID = uuid.NewSHA1(uuid.NameSpaceOID, []byte(accountID)).String()
-		}
 		turnMetadata, _ := json.Marshal(TurnMetadata{
-			InstallationID:      installationID,
+			InstallationID:      t.installationID,
 			SessionID:           sessionID,
 			ThreadID:            sessionID,
 			TurnID:              uuid.NewString(),
@@ -335,6 +353,9 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 			TurnStartedAtUnixMS: turnStartedAtUnixMS(sessionID),
 		})
 		hreq.Headers.Set(TurnMetadataHeader, string(turnMetadata))
+	}
+	if normalized, ok := NormalizeTurnMetadataInstallationID(hreq.Headers.Get(TurnMetadataHeader), t.installationID); ok {
+		hreq.Headers.Set(TurnMetadataHeader, normalized)
 	}
 	if hreq.Headers.Get(ClientRequestIDHeader) == "" {
 		hreq.Headers.Set(ClientRequestIDHeader, uuid.NewString())
@@ -356,6 +377,24 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 	if hreq.Headers.Get("Version") == "" {
 		hreq.Headers.Set("Version", codexDefaultVersion)
 	}
+
+	// Current Codex clients send the installation identity both as turn
+	// metadata and as a flat client_metadata field. Keep both representations
+	// channel-scoped so the upstream never sees the downstream machine ID when
+	// AxonHub rebuilds the request body. Body pass-through, when enabled, runs
+	// later in the pipeline and intentionally restores the original body.
+	hreq.Body, err = sjson.SetBytes(hreq.Body, "client_metadata.x-codex-installation-id", t.installationID)
+	if err != nil {
+		return nil, fmt.Errorf("set codex installation client metadata: %w", err)
+	}
+	hreq.Body, err = sjson.SetBytes(hreq.Body, "client_metadata.x-codex-turn-metadata", hreq.Headers.Get(TurnMetadataHeader))
+	if err != nil {
+		return nil, fmt.Errorf("set codex turn client metadata: %w", err)
+	}
+	hreq.SkipInboundHeaderMerge = append(hreq.SkipInboundHeaderMerge,
+		"X-Codex-Installation-Id",
+		TurnMetadataHeader,
+	)
 
 	return hreq, nil
 }

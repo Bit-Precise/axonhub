@@ -25,6 +25,7 @@ jobs:
     runs-on: ubuntu-slim
     outputs:
       tag: ${{ steps.image.outputs.tag }}
+      image: ${{ steps.image.outputs.image }}
 
     steps:
       - name: Resolve immutable image tag
@@ -45,6 +46,8 @@ jobs:
               ;;
           esac
           printf 'tag=%s\n' "$tag" >> "$GITHUB_OUTPUT"
+          image_name=$(printf '%s' "$IMAGE_NAME" | tr '[:upper:]' '[:lower:]')
+          printf 'image=%s/%s\n' "$REGISTRY" "$image_name" >> "$GITHUB_OUTPUT"
 
   build-single-arch:
     name: Build and push (${{ matrix.arch }}) [native]
@@ -87,7 +90,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ${{ needs.prepare.outputs.image }}
           tags: type=raw,value=${{ needs.prepare.outputs.tag }}-${{ matrix.arch }}
 
       - name: Build and push native image
@@ -121,10 +124,11 @@ jobs:
 
       - name: Create and push manifest
         env:
+          IMAGE: ${{ needs.prepare.outputs.image }}
           IMAGE_TAG: ${{ needs.prepare.outputs.tag }}
         run: |
           set -eu
-          image="${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}"
+          image="${IMAGE}:${IMAGE_TAG}"
           docker buildx imagetools create \
             --tag "$image" \
             "${image}-amd64" \
@@ -133,10 +137,11 @@ jobs:
 
       - name: Publish image reference
         env:
+          IMAGE: ${{ needs.prepare.outputs.image }}
           IMAGE_TAG: ${{ needs.prepare.outputs.tag }}
         run: |
           {
             echo "### GHCR image"
             echo
-            echo "\`${REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}\`"
+            echo "\`${IMAGE}:${IMAGE_TAG}\`"
           } >> "$GITHUB_STEP_SUMMARY"

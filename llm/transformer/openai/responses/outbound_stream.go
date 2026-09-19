@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"reflect"
 	"strings"
 
@@ -74,6 +75,7 @@ type outboundStreamState struct {
 	// Transformer metadata tracking
 	transformerMetadata        map[string]any
 	transformerMetadataEmitted bool
+	responseHeaders            http.Header
 }
 
 func newResponsesOutboundStream(stream streams.Stream[*httpclient.StreamEvent]) *responsesOutboundStream {
@@ -137,6 +139,9 @@ func (s *responsesOutboundStream) transformStreamChunk(event *httpclient.StreamE
 	if event == nil {
 		return nil
 	}
+	if len(event.Headers) > 0 {
+		s.state.responseHeaders = event.Headers.Clone()
+	}
 	if len(event.Data) == 0 {
 		if event.Type == string(StreamEventTypeError) {
 			return newResponsesStreamError(event, StreamEvent{Type: StreamEventTypeError})
@@ -174,6 +179,8 @@ func (s *responsesOutboundStream) transformStreamChunk(event *httpclient.StreamE
 	if streamEvent.Type == "" {
 		if event.Type == string(StreamEventTypeError) || gjson.GetBytes(event.Data, "event").String() == string(StreamEventTypeError) {
 			streamEvent.Type = StreamEventTypeError
+		} else if event.Type == string(StreamEventTypeResponseMetadata) {
+			streamEvent.Type = StreamEventTypeResponseMetadata
 		}
 	}
 
@@ -188,6 +195,23 @@ func (s *responsesOutboundStream) transformStreamChunk(event *httpclient.StreamE
 		Model:              s.state.responseModel,
 		Created:            s.state.created,
 		PreviousResponseID: s.state.previousResponseID,
+	}
+	if len(s.state.responseHeaders) > 0 {
+		resp.TransformerMetadata = map[string]any{
+			responseHeadersTransformerMetadataKey: s.state.responseHeaders.Clone(),
+		}
+	}
+
+	// Codex uses response.metadata to carry per-request routing state on the
+	// WebSocket transport. Preserve this event verbatim so the inbound
+	// Responses transformer can emit it for downstream clients.
+	if streamEvent.Type == StreamEventTypeResponseMetadata {
+		if resp.TransformerMetadata == nil {
+			resp.TransformerMetadata = make(map[string]any)
+		}
+		resp.TransformerMetadata[responseMetadataTransformerMetadataKey] = json.RawMessage(append([]byte(nil), event.Data...))
+		s.enqueue(resp)
+		return nil
 	}
 
 	//nolint:exhaustive //Only process events we care about.

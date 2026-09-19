@@ -7,6 +7,7 @@ import (
 )
 
 var rawCreateRequestFields = []string{
+	"client_metadata",
 	"context_management",
 	"conversation",
 	"moderation",

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"path/filepath"
 	"strings"
 	"time"
@@ -413,6 +414,7 @@ func (s *RequestService) CreateRequest(
 	}
 
 	appmetrics.Metrics.RecordDownstreamRequestCreated(ctx, requestMetricAttributes(ctx, req, req.ChannelID, ""))
+	contexts.NotifyRequestRecord(ctx, req.ID)
 
 	// Save request body to external storage if needed
 	if useExternalStorage {
@@ -598,6 +600,21 @@ func (s *RequestService) UpdateRequestCompleted(
 	metrics *LatencyMetrics,
 ) error {
 	return s.UpdateRequestFinalized(ctx, requestID, request.StatusCompleted, externalId, responseBody, metrics)
+}
+
+// UpdateRequestResponseHeaders persists the masked headers returned to the downstream client.
+func (s *RequestService) UpdateRequestResponseHeaders(ctx context.Context, requestID int, headers http.Header) error {
+	data, err := s.responseHeadersForStorage(ctx, headers)
+	if err != nil {
+		return fmt.Errorf("failed to serialize response headers: %w", err)
+	}
+	if data == nil {
+		return nil
+	}
+	if _, err := s.entFromContext(ctx).Request.UpdateOneID(requestID).SetResponseHeaders(data).Save(ctx); err != nil {
+		return fmt.Errorf("failed to save response headers: %w", err)
+	}
+	return nil
 }
 
 // UpdateRequestFinalized atomically records a logical request's terminal outcome.
@@ -898,6 +915,32 @@ func (s *RequestService) UpdateRequestExecutionCompleted(
 	metrics *LatencyMetrics,
 ) error {
 	return s.UpdateRequestExecutionFinalized(ctx, executionID, requestexecution.StatusCompleted, "", externalId, responseBody, metrics)
+}
+
+// UpdateRequestExecutionResponseHeaders persists the masked headers returned by the upstream provider.
+func (s *RequestService) UpdateRequestExecutionResponseHeaders(ctx context.Context, executionID int, headers http.Header) error {
+	data, err := s.responseHeadersForStorage(ctx, headers)
+	if err != nil {
+		return fmt.Errorf("failed to serialize execution response headers: %w", err)
+	}
+	if data == nil {
+		return nil
+	}
+	if _, err := s.entFromContext(ctx).RequestExecution.UpdateOneID(executionID).SetResponseHeaders(data).Save(ctx); err != nil {
+		return fmt.Errorf("failed to save execution response headers: %w", err)
+	}
+	return nil
+}
+
+func (s *RequestService) responseHeadersForStorage(ctx context.Context, headers http.Header) (objects.JSONRawMessage, error) {
+	if len(headers) == 0 {
+		return nil, nil
+	}
+	policy, err := s.SystemService.StoragePolicy(authz.WithSystemBypass(ctx, "response-header-storage-policy"))
+	if err == nil && !policy.StoreResponseBody {
+		return nil, nil
+	}
+	return xjson.Marshal(httpclient.MaskSensitiveHeaders(headers))
 }
 
 // UpdateRequestExecutionFinalized atomically records one execution's terminal outcome.

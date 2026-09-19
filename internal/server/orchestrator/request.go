@@ -192,6 +192,9 @@ func (m *persistRequestMiddleware) OnInboundRawResponse(ctx context.Context, htt
 		if err != nil {
 			log.Warn(persistCtx, "Failed to update video request status to processing", log.Cause(err))
 		}
+		if err := state.RequestService.UpdateRequestResponseHeaders(persistCtx, state.Request.ID, httpResp.Headers); err != nil {
+			log.Warn(persistCtx, "Failed to save response headers", log.Cause(err))
+		}
 
 		return httpResp, nil
 	}
@@ -217,6 +220,9 @@ func (m *persistRequestMiddleware) OnInboundRawResponse(ctx context.Context, htt
 		if err != nil {
 			log.Warn(persistCtx, "Failed to update speech request status to completed", log.Cause(err))
 		}
+		if err := state.RequestService.UpdateRequestResponseHeaders(persistCtx, state.Request.ID, httpResp.Headers); err != nil {
+			log.Warn(persistCtx, "Failed to save response headers", log.Cause(err))
+		}
 
 		return httpResp, nil
 	}
@@ -227,6 +233,9 @@ func (m *persistRequestMiddleware) OnInboundRawResponse(ctx context.Context, htt
 	err := state.RequestService.UpdateRequestCompleted(persistCtx, state.Request.ID, llmResp.ID, respBody, metrics)
 	if err != nil {
 		log.Warn(persistCtx, "Failed to update request status to completed", log.Cause(err))
+	}
+	if err := state.RequestService.UpdateRequestResponseHeaders(persistCtx, state.Request.ID, httpResp.Headers); err != nil {
+		log.Warn(persistCtx, "Failed to save response headers", log.Cause(err))
 	}
 
 	return httpResp, nil

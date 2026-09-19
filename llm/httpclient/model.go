@@ -65,7 +65,14 @@ type Request struct {
 	// SkipInboundHeaderMerge lists inbound header names that the outbound
 	// transformer owns and must not be overwritten during MergeInboundRequest.
 	// Header matching is case-insensitive.
-	SkipInboundHeaderMerge []string `json:"-"`
+	SkipInboundHeaderMerge []string                           `json:"-"`
+	OnResponseHeaders      func(context.Context, http.Header) `json:"-"`
+}
+
+func (r *Request) ObserveResponseHeaders(ctx context.Context, headers http.Header) {
+	if r != nil && r.OnResponseHeaders != nil {
+		r.OnResponseHeaders(ctx, headers.Clone())
+	}
 }
 
 // AuthConfig represents authentication configuration.
@@ -121,6 +128,9 @@ type StreamEvent struct {
 	// from Data for persistence (e.g. raw TTS audio chunks). It lets stream
 	// aggregators report total bytes without retaining the audio payload.
 	Size int `json:"size,omitempty"`
+	// Headers is populated only on the first event by HTTP stream executors.
+	// It is transport metadata and is excluded from persisted chunk JSON.
+	Headers http.Header `json:"-"`
 }
 
 // IsBinaryAudioChunk reports whether the event carries a raw binary audio payload

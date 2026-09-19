@@ -271,6 +271,9 @@ func (hc *HttpClient) Do(ctx context.Context, request *Request) (*Response, erro
 	}
 
 	rawResp, err := hc.client.Do(rawReq)
+	if rawResp != nil {
+		request.ObserveResponseHeaders(ctx, rawResp.Header)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("HTTP request failed: %w", err)
 	}
@@ -362,6 +365,9 @@ func (hc *HttpClient) DoStream(ctx context.Context, request *Request) (streams.S
 
 	// Execute request
 	rawResp, err := hc.client.Do(rawReq)
+	if rawResp != nil {
+		request.ObserveResponseHeaders(ctx, rawResp.Header)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("HTTP stream request failed: %w", err)
 	}
@@ -420,8 +426,15 @@ func (hc *HttpClient) DoStream(ctx context.Context, request *Request) (streams.S
 	}
 
 	stream := decoderFactory(ctx, rawResp.Body)
-
-	return stream, nil
+	responseHeaders := rawResp.Header.Clone()
+	first := true
+	return streams.Map(stream, func(event *StreamEvent) *StreamEvent {
+		if event != nil && first {
+			event.Headers = responseHeaders
+			first = false
+		}
+		return event
+	}), nil
 }
 
 func urlForLog(value *url.URL) string {

@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/tidwall/gjson"
@@ -62,7 +64,24 @@ type persistRequestExecutionMiddleware struct {
 
 	outbound *PersistentOutboundTransformer
 
-	rawResponse *httpclient.Response
+	rawResponse    *httpclient.Response
+	headerObserver *executionHeaderObserver
+}
+
+// Each attempt owns its observer so a retry cannot inherit another execution's headers.
+type executionHeaderObserver struct {
+	service     *biz.RequestService
+	executionID int
+	observed    atomic.Bool
+}
+
+func (o *executionHeaderObserver) observe(ctx context.Context, headers http.Header) {
+	o.observed.Store(true)
+	persistCtx, cancel := xcontext.DetachWithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if err := o.service.UpdateRequestExecutionResponseHeaders(persistCtx, o.executionID, headers); err != nil {
+		log.Warn(persistCtx, "Failed to save execution response headers", log.Cause(err), log.Int("execution_id", o.executionID))
+	}
 }
 
 func persistRequestExecution(outbound *PersistentOutboundTransformer) pipeline.Middleware {
@@ -77,7 +96,14 @@ func (m *persistRequestExecutionMiddleware) Name() string {
 
 func (m *persistRequestExecutionMiddleware) OnOutboundRawRequest(ctx context.Context, request *httpclient.Request) (*httpclient.Request, error) {
 	state := m.outbound.state
-	if state == nil || state.RequestExec != nil {
+	if state == nil {
+		return request, nil
+	}
+	if state.RequestExec != nil {
+		if m.headerObserver != nil {
+			m.headerObserver.observed.Store(false)
+			request.OnResponseHeaders = m.headerObserver.observe
+		}
 		return request, nil
 	}
 
@@ -121,12 +147,21 @@ func (m *persistRequestExecutionMiddleware) OnOutboundRawRequest(ctx context.Con
 	}
 
 	state.RequestExec = requestExec
+	m.rawResponse = nil
+	observer := &executionHeaderObserver{service: state.RequestService, executionID: requestExec.ID}
+	m.headerObserver = observer
+	request.OnResponseHeaders = observer.observe
 
 	return request, nil
 }
 
 func (m *persistRequestExecutionMiddleware) OnOutboundRawResponse(ctx context.Context, response *httpclient.Response) (*httpclient.Response, error) {
 	m.rawResponse = response
+	// Custom executors may return a response without going through HttpClient.
+	// Do not replace observed transport headers with a synthetic aggregated response.
+	if response != nil && m.headerObserver != nil && !m.headerObserver.observed.Load() {
+		m.headerObserver.observe(ctx, response.Headers)
+	}
 	return response, nil
 }
 
@@ -231,6 +266,11 @@ func (m *persistRequestExecutionMiddleware) OnOutboundRawError(ctx context.Conte
 	)
 	if updateErr != nil {
 		log.Warn(persistCtx, "Failed to update request execution status to failed", log.Cause(updateErr))
+	}
+	if httpErr, ok := xerrors.As[*httpclient.Error](diagnosticError(failure)); ok && httpErr != nil {
+		if m.headerObserver != nil && !m.headerObserver.observed.Load() {
+			m.headerObserver.observe(persistCtx, httpErr.Headers)
+		}
 	}
 }
 

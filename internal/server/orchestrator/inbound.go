@@ -398,6 +398,11 @@ func (ts *InboundPersistentStream) _persistResponse(ctx context.Context, respons
 	if err != nil {
 		log.Warn(ctx, "Failed to update request status to completed", log.Cause(err))
 	}
+	if ts.state != nil && len(ts.state.ResponseHeaders) > 0 {
+		if err := ts.requestService.UpdateRequestResponseHeaders(ctx, ts.request.ID, ts.state.ResponseHeaders); err != nil {
+			log.Warn(ctx, "Failed to save response headers", log.Cause(err))
+		}
+	}
 
 	// Save all response chunks at once
 	if err := ts.requestService.SaveRequestChunks(ctx, ts.request.ID, ts.responseChunks); err != nil {

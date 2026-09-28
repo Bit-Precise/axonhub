@@ -475,6 +475,9 @@ func (e *WebSocketExecutor) dial(ctx context.Context, request *httpclient.Reques
 	}
 
 	conn, resp, err := dialer.DialContext(ctx, wsURL, headers)
+	if resp != nil {
+		request.ObserveResponseHeaders(ctx, resp.Header)
+	}
 	if err != nil {
 		return nil, newWebSocketDialError(request, resp, err)
 	}

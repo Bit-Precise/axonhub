@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"net/http"
 
 	"github.com/looplj/axonhub/internal/ent"
 	"github.com/looplj/axonhub/internal/server/biz"
@@ -63,6 +64,9 @@ type PersistenceState struct {
 
 	// RawProviderResponse stores the raw provider response for non-stream response pass-through.
 	RawProviderResponse *httpclient.Response
+
+	// ResponseHeaders contains masked headers from the upstream response.
+	ResponseHeaders http.Header
 
 	// RawProviderRequest stores the actual outbound provider request for pass-through checks.
 	RawProviderRequest *httpclient.Request

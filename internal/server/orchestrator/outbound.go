@@ -79,6 +79,9 @@ func (ts *OutboundPersistentStream) Next() bool {
 func (ts *OutboundPersistentStream) Current() *httpclient.StreamEvent {
 	event := ts.stream.Current()
 	if event != nil {
+		if ts.state != nil && len(ts.state.ResponseHeaders) == 0 && len(event.Headers) > 0 {
+			ts.state.ResponseHeaders = event.Headers.Clone()
+		}
 		// For raw binary audio chunks (TTS stream_format=audio), persist only a size
 		// summary to avoid buffering the full audio payload in memory.
 		ts.responseChunks = append(ts.responseChunks, httpclient.SummarizeBinaryChunk(event))
@@ -311,6 +314,11 @@ func (ts *OutboundPersistentStream) persistExecutionFailure(ctx context.Context,
 	if err != nil {
 		log.Warn(ctx, "Failed to update request execution status from error", log.Cause(err))
 	}
+	if ts.state != nil && len(ts.state.ResponseHeaders) > 0 {
+		if err := ts.RequestService.UpdateRequestExecutionResponseHeaders(ctx, ts.requestExec.ID, ts.state.ResponseHeaders); err != nil {
+			log.Warn(ctx, "Failed to save execution response headers", log.Cause(err))
+		}
+	}
 }
 
 func (ts *OutboundPersistentStream) persistAggregatedResponse(ctx context.Context, responseBody []byte, meta llm.ResponseMeta) {
@@ -353,6 +361,11 @@ func (ts *OutboundPersistentStream) persistAggregatedResponse(ctx context.Contex
 			"Failed to update request execution with chunks, trying basic completion",
 			log.Cause(err),
 		)
+	}
+	if ts.state != nil && len(ts.state.ResponseHeaders) > 0 {
+		if err := ts.RequestService.UpdateRequestExecutionResponseHeaders(ctx, ts.requestExec.ID, ts.state.ResponseHeaders); err != nil {
+			log.Warn(ctx, "Failed to save execution response headers", log.Cause(err))
+		}
 	}
 
 	// Save all response chunks at once

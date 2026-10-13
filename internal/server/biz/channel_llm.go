@@ -35,6 +35,7 @@ import (
 	geminioai "github.com/looplj/axonhub/llm/transformer/gemini/openai"
 	"github.com/looplj/axonhub/llm/transformer/jina"
 	"github.com/looplj/axonhub/llm/transformer/longcat"
+	"github.com/looplj/axonhub/llm/transformer/minimax"
 	"github.com/looplj/axonhub/llm/transformer/modelscope"
 	"github.com/looplj/axonhub/llm/transformer/moonshot"
 	"github.com/looplj/axonhub/llm/transformer/nanogpt"
@@ -42,9 +43,11 @@ import (
 	"github.com/looplj/axonhub/llm/transformer/openai"
 	"github.com/looplj/axonhub/llm/transformer/openai/codex"
 	"github.com/looplj/axonhub/llm/transformer/openai/copilot"
+	"github.com/looplj/axonhub/llm/transformer/openai/decisions"
 	"github.com/looplj/axonhub/llm/transformer/openai/responses"
 	"github.com/looplj/axonhub/llm/transformer/opencode"
 	"github.com/looplj/axonhub/llm/transformer/openrouter"
+	"github.com/looplj/axonhub/llm/transformer/typesafe"
 	"github.com/looplj/axonhub/llm/transformer/xai"
 	xaisubscription "github.com/looplj/axonhub/llm/transformer/xai/subscription"
 	"github.com/looplj/axonhub/llm/transformer/zai"
@@ -224,15 +227,6 @@ func (svc *ChannelService) buildChannelWithOutbounds(c *ent.Channel, apiKeyOverr
 			continue
 		}
 
-		if c.Type == channel.TypeZenmux && ep.APIFormat == llm.APIFormatZenmuxVideo.String() {
-			out, err := svc.buildNonDefaultEndpointOutbound(c, ch, ep)
-			if err != nil {
-				return nil, fmt.Errorf("failed to build default outbound for api_format %q on channel %s: %w", ep.APIFormat, c.Name, err)
-			}
-			outbounds[ep.APIFormat] = out
-			continue
-		}
-
 		if c.Type != channel.TypeXai || ep.APIFormat == ch.Outbound.APIFormat().String() {
 			outbounds[ep.APIFormat] = ch.Outbound
 			continue
@@ -309,7 +303,22 @@ func (svc *ChannelService) buildCodexOutbound(
 	alphaSearchPath string,
 	httpClient *httpclient.HttpClient,
 ) (transformer.Outbound, error) {
+	imageMainModel := strings.TrimSpace(c.DefaultTestModel)
+	if imageMainModel != "" {
+		modelChannel := ch
+		if modelChannel == nil {
+			modelChannel = &Channel{Channel: c}
+		}
+		modelKey := imageMainModel
+		if c.Settings != nil && c.Settings.LowercaseModelID {
+			modelKey = strings.ToLower(modelKey)
+		}
+		if mapped, err := modelChannel.ChooseModel(modelKey); err == nil {
+			imageMainModel = mapped
+		}
+	}
 	installationIDs := codexInstallationIDs(c)
+
 	if c.Credentials.IsOAuth() {
 		if ch != nil {
 			if existing, ok := ch.Outbound.(*codex.OutboundTransformer); ok {
@@ -319,6 +328,7 @@ func (svc *ChannelService) buildCodexOutbound(
 						BaseURL:         baseURL,
 						Transport:       transport,
 						AlphaSearchPath: alphaSearchPath,
+						ImageMainModel:  imageMainModel,
 						InstallationIDs: installationIDs,
 					})
 				}
@@ -364,6 +374,7 @@ func (svc *ChannelService) buildCodexOutbound(
 			BaseURL:         baseURL,
 			Transport:       transport,
 			AlphaSearchPath: alphaSearchPath,
+			ImageMainModel:  imageMainModel,
 			InstallationIDs: installationIDs,
 		})
 	}
@@ -376,6 +387,7 @@ func (svc *ChannelService) buildCodexOutbound(
 		BaseURL:         baseURL,
 		Transport:       transport,
 		AlphaSearchPath: alphaSearchPath,
+		ImageMainModel:  imageMainModel,
 		InstallationIDs: installationIDs,
 	})
 }
@@ -494,6 +506,12 @@ func (svc *ChannelService) buildNonDefaultEndpointOutbound(
 			APIKeyProvider: apiKeyProvider(),
 			EndpointPath:   ep.Path,
 		})
+	case llm.APIFormatOpenAIDecisions.String():
+		return decisions.NewOutboundTransformerWithConfig(&decisions.Config{
+			BaseURL:        baseURL,
+			APIKeyProvider: apiKeyProvider(),
+			EndpointPath:   ep.Path,
+		})
 	case llm.APIFormatOpenAIEmbedding.String(),
 		llm.APIFormatOpenAIModeration.String(),
 		llm.APIFormatOpenAIImageGeneration.String(),
@@ -503,6 +521,13 @@ func (svc *ChannelService) buildNonDefaultEndpointOutbound(
 		llm.APIFormatOpenAISpeech.String(),
 		llm.APIFormatOpenAITranscription.String(),
 		llm.APIFormatOpenAITranslation.String():
+		if c.Type == channel.TypeMinimax && ep.APIFormat == llm.APIFormatOpenAIImageGeneration.String() {
+			return minimax.NewOutboundTransformerWithConfig(&minimax.Config{
+				BaseURL:        baseURL,
+				EndpointPath:   ep.Path,
+				APIKeyProvider: apiKeyProvider(),
+			})
+		}
 		if (c.Type == channel.TypeCodex || c.Type == channel.TypeFenno) &&
 			(ep.APIFormat == llm.APIFormatOpenAIImageGeneration.String() ||
 				ep.APIFormat == llm.APIFormatOpenAIImageEdit.String()) {
@@ -518,8 +543,8 @@ func (svc *ChannelService) buildNonDefaultEndpointOutbound(
 			EndpointPath:   ep.Path,
 		})
 	case llm.APIFormatZenmuxVideo.String():
-		if c.Type != channel.TypeZenmux {
-			return nil, fmt.Errorf("api_format %q is only supported by channel type %q", ep.APIFormat, channel.TypeZenmux)
+		if !isZenmuxChannelType(c.Type) {
+			return nil, fmt.Errorf("api_format %q is only supported by ZenMux channel types", ep.APIFormat)
 		}
 
 		return zenmuxtransformer.NewOutboundTransformerWithConfig(&zenmuxtransformer.Config{
@@ -564,6 +589,12 @@ func (svc *ChannelService) buildNonDefaultEndpointOutbound(
 		})
 	case llm.APIFormatJinaRerank.String(), llm.APIFormatJinaEmbedding.String():
 		return jina.NewOutboundTransformerWithConfig(&jina.Config{
+			BaseURL:        baseURL,
+			APIKeyProvider: apiKeyProvider(),
+			EndpointPath:   ep.Path,
+		})
+	case llm.APIFormatTypeSafeSystemOne.String():
+		return typesafe.NewOutboundTransformerWithConfig(&typesafe.Config{
 			BaseURL:        baseURL,
 			APIKeyProvider: apiKeyProvider(),
 			EndpointPath:   ep.Path,
@@ -697,7 +728,7 @@ func (svc *ChannelService) buildChannelWithTransformer(c *ent.Channel, apiKeyOve
 
 	if c.BaseURL == "" {
 		switch c.Type { //nolint:exhaustive // Only ZenMux types have defaults applied here.
-		case channel.TypeZenmux, channel.TypeZenmuxResponses:
+		case channel.TypeZenmux, channel.TypeZenmuxResponses, channel.TypeZenmuxVideo:
 			c.BaseURL = zenmuxOpenAIBaseURL
 		case channel.TypeZenmuxAnthropic:
 			c.BaseURL = zenmuxAnthropicBaseURL
@@ -1100,6 +1131,7 @@ func (svc *ChannelService) buildChannelWithTransformer(c *ent.Channel, apiKeyOve
 		transformer, err := modelscope.NewOutboundTransformerWithConfig(&modelscope.Config{
 			BaseURL:        c.BaseURL,
 			APIKeyProvider: getAPIKeyProvider(ch),
+			HTTPClient:     ch.HTTPClient,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to create outbound transformer: %w", err)
@@ -1134,6 +1166,18 @@ func (svc *ChannelService) buildChannelWithTransformer(c *ent.Channel, apiKeyOve
 		return ch, nil
 	case channel.TypeBailian:
 		transformer, err := bailian.NewOutboundTransformerWithConfig(&bailian.Config{
+			BaseURL:        c.BaseURL,
+			APIKeyProvider: getAPIKeyProvider(ch),
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to create outbound transformer: %w", err)
+		}
+
+		ch.Outbound = transformer
+
+		return ch, nil
+	case channel.TypeBailianResponses:
+		transformer, err := responses.NewOutboundTransformerWithConfig(&responses.Config{
 			BaseURL:        c.BaseURL,
 			APIKeyProvider: getAPIKeyProvider(ch),
 		})
@@ -1264,7 +1308,7 @@ func (svc *ChannelService) buildChannelWithTransformer(c *ent.Channel, apiKeyOve
 		})
 
 		return ch, nil
-	case channel.TypeOpenai, channel.TypeZenmux, channel.TypeAtlascloud, channel.TypeDeepinfra, channel.TypeQiniu, channel.TypeMinimax,
+	case channel.TypeOpenai, channel.TypeZenmux, channel.TypeAtlascloud, channel.TypeDeepinfra, channel.TypeQiniu,
 		channel.TypePpio, channel.TypeSiliconflow,
 		channel.TypeVercel, channel.TypeAihubmix, channel.TypeBurncloud, channel.TypeGithub,
 		channel.TypeEvolink, channel.TypeGroq:
@@ -1279,6 +1323,26 @@ func (svc *ChannelService) buildChannelWithTransformer(c *ent.Channel, apiKeyOve
 
 		ch.Outbound = transformer
 
+		return ch, nil
+	case channel.TypeZenmuxVideo:
+		transformer, err := zenmuxtransformer.NewOutboundTransformerWithConfig(&zenmuxtransformer.Config{
+			BaseURL:        c.BaseURL,
+			APIKeyProvider: getAPIKeyProvider(ch),
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to create ZenMux video outbound transformer: %w", err)
+		}
+		ch.Outbound = transformer
+		return ch, nil
+	case channel.TypeMinimax:
+		transformer, err := minimax.NewOutboundTransformerWithConfig(&minimax.Config{
+			BaseURL:        c.BaseURL,
+			APIKeyProvider: getAPIKeyProvider(ch),
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to create MiniMax outbound transformer: %w", err)
+		}
+		ch.Outbound = transformer
 		return ch, nil
 	case channel.TypeOpenaiResponses:
 		transformer, err := responses.NewOutboundTransformerWithConfig(&responses.Config{
@@ -1320,6 +1384,18 @@ func (svc *ChannelService) buildChannelWithTransformer(c *ent.Channel, apiKeyOve
 		return ch, nil
 	case channel.TypeJina:
 		transformer, err := jina.NewOutboundTransformerWithConfig(&jina.Config{
+			BaseURL:        c.BaseURL,
+			APIKeyProvider: getAPIKeyProvider(ch),
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to create outbound transformer: %w", err)
+		}
+
+		ch.Outbound = transformer
+
+		return ch, nil
+	case channel.TypeTypesafe:
+		transformer, err := typesafe.NewOutboundTransformerWithConfig(&typesafe.Config{
 			BaseURL:        c.BaseURL,
 			APIKeyProvider: getAPIKeyProvider(ch),
 		})

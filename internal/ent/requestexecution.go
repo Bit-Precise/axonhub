@@ -32,16 +32,22 @@ type RequestExecution struct {
 	RequestID int `json:"request_id,omitempty"`
 	// ChannelID holds the value of the "channel_id" field.
 	ChannelID int `json:"channel_id,omitempty"`
+	// 1-based position of the channel API key used for this execution
+	ChannelAPIKeyIndex *int `json:"channel_api_key_index,omitempty"`
 	// Data Storage ID that this request belongs to
 	DataStorageID int `json:"data_storage_id,omitempty"`
 	// ExternalID holds the value of the "external_id" field.
 	ExternalID string `json:"external_id,omitempty"`
-	// ModelID holds the value of the "model_id" field.
+	// Channel model ID selected after model mapping, used for routing and pricing. May differ from the final wire model and the upstream-reported model.
 	ModelID string `json:"model_id,omitempty"`
+	// Raw model reported by the upstream provider response, before client-model rewrite
+	UpstreamModelID string `json:"upstream_model_id,omitempty"`
 	// Format holds the value of the "format" field.
 	Format string `json:"format,omitempty"`
 	// Final reasoning effort sent to the upstream provider
 	ReasoningEffort *string `json:"reasoning_effort,omitempty"`
+	// Last 4 characters of the channel API key used for this execution
+	ChannelAPIKeySuffix *string `json:"channel_api_key_suffix,omitempty"`
 	// RequestBody holds the value of the "request_body" field.
 	RequestBody objects.JSONRawMessage `json:"request_body,omitempty"`
 	// Response headers received from the upstream provider, with sensitive values masked
@@ -133,9 +139,9 @@ func (*RequestExecution) scanValues(columns []string) ([]any, error) {
 			values[i] = new([]byte)
 		case requestexecution.FieldStream, requestexecution.FieldPassThroughApplied:
 			values[i] = new(sql.NullBool)
-		case requestexecution.FieldID, requestexecution.FieldProjectID, requestexecution.FieldRequestID, requestexecution.FieldChannelID, requestexecution.FieldDataStorageID, requestexecution.FieldResponseStatusCode, requestexecution.FieldMetricsLatencyMs, requestexecution.FieldMetricsFirstTokenLatencyMs, requestexecution.FieldMetricsReasoningDurationMs:
+		case requestexecution.FieldID, requestexecution.FieldProjectID, requestexecution.FieldRequestID, requestexecution.FieldChannelID, requestexecution.FieldChannelAPIKeyIndex, requestexecution.FieldDataStorageID, requestexecution.FieldResponseStatusCode, requestexecution.FieldMetricsLatencyMs, requestexecution.FieldMetricsFirstTokenLatencyMs, requestexecution.FieldMetricsReasoningDurationMs:
 			values[i] = new(sql.NullInt64)
-		case requestexecution.FieldExternalID, requestexecution.FieldModelID, requestexecution.FieldFormat, requestexecution.FieldReasoningEffort, requestexecution.FieldErrorMessage, requestexecution.FieldStatus, requestexecution.FieldRequestURL:
+		case requestexecution.FieldExternalID, requestexecution.FieldModelID, requestexecution.FieldUpstreamModelID, requestexecution.FieldFormat, requestexecution.FieldReasoningEffort, requestexecution.FieldChannelAPIKeySuffix, requestexecution.FieldErrorMessage, requestexecution.FieldStatus, requestexecution.FieldRequestURL:
 			values[i] = new(sql.NullString)
 		case requestexecution.FieldCreatedAt, requestexecution.FieldUpdatedAt:
 			values[i] = new(sql.NullTime)
@@ -190,6 +196,13 @@ func (_m *RequestExecution) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.ChannelID = int(value.Int64)
 			}
+		case requestexecution.FieldChannelAPIKeyIndex:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field channel_api_key_index", values[i])
+			} else if value.Valid {
+				_m.ChannelAPIKeyIndex = new(int)
+				*_m.ChannelAPIKeyIndex = int(value.Int64)
+			}
 		case requestexecution.FieldDataStorageID:
 			if value, ok := values[i].(*sql.NullInt64); !ok {
 				return fmt.Errorf("unexpected type %T for field data_storage_id", values[i])
@@ -208,6 +221,12 @@ func (_m *RequestExecution) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.ModelID = value.String
 			}
+		case requestexecution.FieldUpstreamModelID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field upstream_model_id", values[i])
+			} else if value.Valid {
+				_m.UpstreamModelID = value.String
+			}
 		case requestexecution.FieldFormat:
 			if value, ok := values[i].(*sql.NullString); !ok {
 				return fmt.Errorf("unexpected type %T for field format", values[i])
@@ -220,6 +239,13 @@ func (_m *RequestExecution) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.ReasoningEffort = new(string)
 				*_m.ReasoningEffort = value.String
+			}
+		case requestexecution.FieldChannelAPIKeySuffix:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field channel_api_key_suffix", values[i])
+			} else if value.Valid {
+				_m.ChannelAPIKeySuffix = new(string)
+				*_m.ChannelAPIKeySuffix = value.String
 			}
 		case requestexecution.FieldRequestBody:
 			if value, ok := values[i].(*[]byte); !ok {
@@ -385,6 +411,11 @@ func (_m *RequestExecution) String() string {
 	builder.WriteString("channel_id=")
 	builder.WriteString(fmt.Sprintf("%v", _m.ChannelID))
 	builder.WriteString(", ")
+	if v := _m.ChannelAPIKeyIndex; v != nil {
+		builder.WriteString("channel_api_key_index=")
+		builder.WriteString(fmt.Sprintf("%v", *v))
+	}
+	builder.WriteString(", ")
 	builder.WriteString("data_storage_id=")
 	builder.WriteString(fmt.Sprintf("%v", _m.DataStorageID))
 	builder.WriteString(", ")
@@ -394,11 +425,19 @@ func (_m *RequestExecution) String() string {
 	builder.WriteString("model_id=")
 	builder.WriteString(_m.ModelID)
 	builder.WriteString(", ")
+	builder.WriteString("upstream_model_id=")
+	builder.WriteString(_m.UpstreamModelID)
+	builder.WriteString(", ")
 	builder.WriteString("format=")
 	builder.WriteString(_m.Format)
 	builder.WriteString(", ")
 	if v := _m.ReasoningEffort; v != nil {
 		builder.WriteString("reasoning_effort=")
+		builder.WriteString(*v)
+	}
+	builder.WriteString(", ")
+	if v := _m.ChannelAPIKeySuffix; v != nil {
+		builder.WriteString("channel_api_key_suffix=")
 		builder.WriteString(*v)
 	}
 	builder.WriteString(", ")

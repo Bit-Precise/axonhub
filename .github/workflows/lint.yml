@@ -5,10 +5,12 @@ on:
   push:
     branches:
       - 'unstable'
+      - 'release'
       - 'release/**'
   pull_request:
     branches:
       - 'unstable'
+      - 'release'
       - 'release/**'
 env:
   GO111MODULE: on

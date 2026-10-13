@@ -34,6 +34,7 @@ type Request struct {
 	// Request tracking
 	RequestID string `json:"request_id"`
 	ClientIP  string `json:"client_ip"`
+	UserAgent string `json:"user_agent"`
 
 	// RequestType is the type of the request, ref to llm.RequestType.
 	// For example, "chat", "image", "embedding", etc.
@@ -121,15 +122,16 @@ type Response struct {
 }
 
 type StreamEvent struct {
-	LastEventID string `json:"last_event_id,omitempty"`
-	Type        string `json:"type"`
-	Data        []byte `json:"data"`
+	LastEventID                string `json:"last_event_id,omitempty"`
+	Type                       string `json:"type"`
+	Data                       []byte `json:"data"`
+	CleanEOFCompletionEvidence bool   `json:"-"`
 	// Size optionally carries the byte size of a binary chunk that was elided
 	// from Data for persistence (e.g. raw TTS audio chunks). It lets stream
 	// aggregators report total bytes without retaining the audio payload.
 	Size int `json:"size,omitempty"`
 	// Headers is populated only on the first event by HTTP stream executors.
-	// It is transport metadata and is excluded from persisted chunk JSON.
+	// It carries transport metadata such as Codex turn-state headers.
 	Headers http.Header `json:"-"`
 }
 

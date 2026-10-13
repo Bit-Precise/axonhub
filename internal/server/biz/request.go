@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -366,6 +367,7 @@ func (s *RequestService) CreateRequest(
 
 	if httpRequest != nil {
 		mut = mut.SetClientIP(httpRequest.ClientIP)
+		mut = mut.SetUserAgent(httpRequest.UserAgent)
 	}
 
 	if llmRequest.ReasoningEffort != "" {
@@ -393,6 +395,12 @@ func (s *RequestService) CreateRequest(
 
 	if trace, ok := contexts.GetTrace(ctx); ok && trace != nil {
 		mut = mut.SetTraceID(trace.ID)
+	}
+
+	if contexts.GetSourceOrDefault(ctx, request.SourceAPI) == request.SourcePlayground {
+		if user, ok := contexts.GetUser(ctx); ok && user != nil {
+			mut = mut.SetUserID(user.ID)
+		}
 	}
 
 	// Create request
@@ -426,6 +434,10 @@ func (s *RequestService) CreateRequest(
 			// Continue anyway, don't fail the request creation
 		}
 	}
+
+	// Let the downstream response-header middleware associate the eventual
+	// HTTP response with this persisted request row.
+	contexts.NotifyRequestRecord(ctx, req.ID)
 
 	return req, nil
 }
@@ -513,6 +525,27 @@ func (s *RequestService) CreateRequestExecution(
 		mut = mut.SetReasoningEffort(*reasoningEffort)
 	}
 
+	// Record which channel credential served this execution. Both facts are read
+	// from the key actually sent upstream, which is known here while the
+	// credentials are still at hand.
+	if apiKey, ok := contexts.GetChannelAPIKey(ctx); ok {
+		runes := []rune(apiKey)
+		if len(runes) > 4 {
+			mut = mut.SetChannelAPIKeySuffix(string(runes[len(runes)-4:]))
+		}
+
+		// The 1-based position is derived here rather than resolved from the
+		// stored suffix later: a lookup would drift as soon as keys are
+		// reordered or removed, and it cannot tell two keys with the same last-4
+		// characters apart. Single-key and OAuth channels have nothing to
+		// disambiguate, so they stay null.
+		if allKeys := channel.Credentials.GetAllAPIKeys(); len(allKeys) > 1 {
+			if idx := slices.Index(allKeys, apiKey); idx >= 0 {
+				mut = mut.SetChannelAPIKeyIndex(idx + 1)
+			}
+		}
+	}
+
 	if channelRequest.URL != "" {
 		mut = mut.SetRequestURL(channelRequest.URL)
 	}
@@ -591,30 +624,33 @@ type LatencyMetrics struct {
 	ReasoningDurationMs *int64
 }
 
-// UpdateRequestCompleted updates request status to completed with response body.
-func (s *RequestService) UpdateRequestCompleted(
-	ctx context.Context,
-	requestID int,
-	externalId string,
-	responseBody any,
-	metrics *LatencyMetrics,
-) error {
-	return s.UpdateRequestFinalized(ctx, requestID, request.StatusCompleted, externalId, responseBody, metrics)
-}
-
-// UpdateRequestResponseHeaders persists the masked headers returned to the downstream client.
 func (s *RequestService) UpdateRequestResponseHeaders(ctx context.Context, requestID int, headers http.Header) error {
 	data, err := s.responseHeadersForStorage(ctx, headers)
-	if err != nil {
-		return fmt.Errorf("failed to serialize response headers: %w", err)
+	if err != nil || data == nil {
+		return err
 	}
-	if data == nil {
-		return nil
+	_, err = s.entFromContext(ctx).Request.UpdateOneID(requestID).SetResponseHeaders(data).Save(ctx)
+	return err
+}
+
+func (s *RequestService) UpdateRequestExecutionResponseHeaders(ctx context.Context, executionID int, headers http.Header) error {
+	data, err := s.responseHeadersForStorage(ctx, headers)
+	if err != nil || data == nil {
+		return err
 	}
-	if _, err := s.entFromContext(ctx).Request.UpdateOneID(requestID).SetResponseHeaders(data).Save(ctx); err != nil {
-		return fmt.Errorf("failed to save response headers: %w", err)
+	_, err = s.entFromContext(ctx).RequestExecution.UpdateOneID(executionID).SetResponseHeaders(data).Save(ctx)
+	return err
+}
+
+func (s *RequestService) responseHeadersForStorage(ctx context.Context, headers http.Header) (objects.JSONRawMessage, error) {
+	if len(headers) == 0 {
+		return nil, nil
 	}
-	return nil
+	policy, err := s.SystemService.StoragePolicy(authz.WithSystemBypass(ctx, "response-header-storage-policy"))
+	if err == nil && !policy.StoreResponseBody {
+		return nil, nil
+	}
+	return xjson.Marshal(httpclient.MaskSensitiveHeaders(headers))
 }
 
 // UpdateRequestFinalized atomically records a logical request's terminal outcome.
@@ -906,45 +942,17 @@ func (s *RequestService) UpdateRequestStatusExternalIDAndResponseBody(
 	return nil
 }
 
-// UpdateRequestExecutionCompleted updates request execution status to completed with response body.
-func (s *RequestService) UpdateRequestExecutionCompleted(
+// UpdateRequestExecutionFinalized atomically records one execution's terminal outcome.
+func (s *RequestService) UpdateRequestExecutionFinalized(
 	ctx context.Context,
 	executionID int,
+	status requestexecution.Status,
+	errorMessage string,
 	externalId string,
 	responseBody any,
 	metrics *LatencyMetrics,
+	upstreamModelID string,
 ) error {
-	return s.UpdateRequestExecutionFinalized(ctx, executionID, requestexecution.StatusCompleted, "", externalId, responseBody, metrics)
-}
-
-// UpdateRequestExecutionResponseHeaders persists the masked headers returned by the upstream provider.
-func (s *RequestService) UpdateRequestExecutionResponseHeaders(ctx context.Context, executionID int, headers http.Header) error {
-	data, err := s.responseHeadersForStorage(ctx, headers)
-	if err != nil {
-		return fmt.Errorf("failed to serialize execution response headers: %w", err)
-	}
-	if data == nil {
-		return nil
-	}
-	if _, err := s.entFromContext(ctx).RequestExecution.UpdateOneID(executionID).SetResponseHeaders(data).Save(ctx); err != nil {
-		return fmt.Errorf("failed to save execution response headers: %w", err)
-	}
-	return nil
-}
-
-func (s *RequestService) responseHeadersForStorage(ctx context.Context, headers http.Header) (objects.JSONRawMessage, error) {
-	if len(headers) == 0 {
-		return nil, nil
-	}
-	policy, err := s.SystemService.StoragePolicy(authz.WithSystemBypass(ctx, "response-header-storage-policy"))
-	if err == nil && !policy.StoreResponseBody {
-		return nil, nil
-	}
-	return xjson.Marshal(httpclient.MaskSensitiveHeaders(headers))
-}
-
-// UpdateRequestExecutionFinalized atomically records one execution's terminal outcome.
-func (s *RequestService) UpdateRequestExecutionFinalized(ctx context.Context, executionID int, status requestexecution.Status, errorMessage, externalId string, responseBody any, metrics *LatencyMetrics) error {
 	// Decide whether to store the final response body for execution
 	storeResponseBody := true
 	if policy, err := s.SystemService.StoragePolicy(ctx); err == nil {
@@ -982,6 +990,13 @@ func (s *RequestService) UpdateRequestExecutionFinalized(ctx context.Context, ex
 	upd := client.RequestExecution.UpdateOneID(executionID).
 		SetStatus(status).
 		SetExternalID(externalId)
+	if errorMessage != "" {
+		upd = upd.SetErrorMessage(errorMessage)
+	}
+
+	if upstreamModelID != "" {
+		upd = upd.SetUpstreamModelID(upstreamModelID)
+	}
 	if errorMessage != "" {
 		upd = upd.SetErrorMessage(errorMessage)
 	}
@@ -1077,12 +1092,12 @@ func (s *RequestService) UpdateRequestExecutionStatus(
 	errorMsg string,
 	errorInfo *ExecutionErrorInfo,
 ) error {
-	return s.UpdateRequestExecutionStatusWithMetrics(ctx, executionID, status, errorMsg, errorInfo, nil)
+	return s.UpdateRequestExecutionStatusWithMetrics(ctx, executionID, status, errorMsg, errorInfo, nil, "")
 }
 
 // UpdateRequestExecutionStatusWithMetrics is UpdateRequestExecutionStatus plus the latency
-// metrics collected before the execution ended, so a failed execution keeps its
-// time-to-first-token and total latency instead of losing them with the error.
+// metrics and upstream models collected before the execution ended, so a failed
+// execution keeps its metadata even when its response cannot be aggregated.
 func (s *RequestService) UpdateRequestExecutionStatusWithMetrics(
 	ctx context.Context,
 	executionID int,
@@ -1090,6 +1105,7 @@ func (s *RequestService) UpdateRequestExecutionStatusWithMetrics(
 	errorMsg string,
 	errorInfo *ExecutionErrorInfo,
 	metrics *LatencyMetrics,
+	upstreamModelID string,
 ) error {
 	client := s.entFromContext(ctx)
 
@@ -1098,7 +1114,7 @@ func (s *RequestService) UpdateRequestExecutionStatusWithMetrics(
 		return fmt.Errorf("failed to get request execution before status update: %w", err)
 	}
 	wasTerminal := isTerminalExecutionStatus(execution.Status)
-	if wasTerminal {
+	if wasTerminal && !(execution.Status == requestexecution.StatusCompleted && status == requestexecution.StatusFailed) {
 		return nil
 	}
 	req, reqErr := client.Request.Get(ctx, execution.RequestID)
@@ -1108,6 +1124,10 @@ func (s *RequestService) UpdateRequestExecutionStatusWithMetrics(
 
 	upd := client.RequestExecution.UpdateOneID(executionID).
 		SetStatus(status)
+	// A later status-only update must not clear metadata captured at finalization.
+	if upstreamModelID != "" {
+		upd = upd.SetUpstreamModelID(upstreamModelID)
+	}
 	if errorMsg != "" {
 		upd = upd.SetErrorMessage(errorMsg)
 	}
@@ -1130,7 +1150,12 @@ func (s *RequestService) UpdateRequestExecutionStatusWithMetrics(
 		}
 	}
 
-	updated, err := s.saveExecutionTransition(ctx, upd, executionID)
+	updated := true
+	if wasTerminal {
+		_, err = upd.Save(ctx)
+	} else {
+		updated, err = s.saveExecutionTransition(ctx, upd, executionID)
+	}
 	if err != nil {
 		log.Error(ctx, "Failed to update request execution status", log.Cause(err), log.Any("status", status))
 		return err

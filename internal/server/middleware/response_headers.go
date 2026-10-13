@@ -48,10 +48,13 @@ type responseHeadersWriter struct {
 	headers http.Header
 }
 
+// Unwrap preserves http.ResponseController support (notably SSE write
+// deadlines) through this capture wrapper.
 func (w *responseHeadersWriter) Unwrap() http.ResponseWriter {
 	if unwrapper, ok := w.ResponseWriter.(interface{ Unwrap() http.ResponseWriter }); ok {
 		return unwrapper.Unwrap()
 	}
+
 	return w.ResponseWriter
 }
 
@@ -81,11 +84,14 @@ func (w *responseHeadersWriter) Flush() {
 	w.ResponseWriter.Flush()
 }
 
+// FlushError preserves Gin/custom writer flush errors for SSE disconnect
+// detection while still capturing the headers before the first flush.
 func (w *responseHeadersWriter) FlushError() error {
 	w.capture()
 	if flusher, ok := w.ResponseWriter.(interface{ FlushError() error }); ok {
 		return flusher.FlushError()
 	}
+
 	w.ResponseWriter.Flush()
 	return nil
 }

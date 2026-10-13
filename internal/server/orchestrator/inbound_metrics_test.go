@@ -24,17 +24,22 @@ func TestInboundFirstOutputDoesNotRecordRequestDuration(t *testing.T) {
 		_ = provider.Shutdown(context.Background())
 	})
 	require.NoError(t, appmetrics.SetupMetrics(provider, "inbound-test"))
-	stream := &InboundPersistentStream{
-		ctx:     t.Context(),
-		request: &ent.Request{CreatedAt: time.Now().Add(-time.Second), ModelID: "requested", Stream: true},
-		state:   &PersistenceState{},
-		stream: &mockStream{events: []*httpclient.StreamEvent{
+	req := &ent.Request{CreatedAt: time.Now().Add(-time.Second), ModelID: "requested", Stream: true}
+	stream := NewInboundPersistentStream(
+		t.Context(),
+		&mockStream{events: []*httpclient.StreamEvent{
 			{Data: []byte(`{"type":"response.created"}`)},
 			{Data: []byte(`{"choices":[{"delta":{"role":"assistant","content":""}}]}`)},
 			{Data: []byte(`{"choices":[{"delta":{"content":"hello"}}]}`)},
 			{Data: []byte(`{"choices":[{"delta":{"content":" world"}}]}`)},
 		}},
-	}
+		req,
+		nil,
+		nil,
+		nil,
+		nil,
+		&PersistenceState{},
+	)
 	for i := 0; stream.Next(); i++ {
 		stream.Current()
 		require.Equal(t, i >= 2, stream.downstreamTTFTRecorded)

@@ -30,6 +30,7 @@ type Handlers struct {
 	Auth           *api.AuthHandlers
 	Invitation     *api.InvitationHandlers
 	Jina           *api.JinaHandlers
+	TypeSafe       *api.TypeSafeHandlers
 	Codex          *api.CodexHandlers
 	XAI            *api.XAIHandlers
 	ClaudeCode     *api.ClaudeCodeHandlers
@@ -94,6 +95,7 @@ func SetupRoutes(server *Server, handlers Handlers, client *ent.Client, services
 		unSecureAdminGroup.POST("/system/initialize", handlers.System.InitializeSystem)
 		// User Login - DO NOT AUTH
 		unSecureAdminGroup.POST("/auth/signin", handlers.Auth.SignIn)
+		unSecureAdminGroup.POST("/auth/refresh", handlers.Auth.Refresh)
 	}
 
 	oauthGroup := server.Group("/oauth", middleware.WithTimeout(server.Config.RequestTimeout))
@@ -106,9 +108,6 @@ func SetupRoutes(server *Server, handlers Handlers, client *ent.Client, services
 	{
 		adminGroup.GET("/playground", middleware.WithTimeout(server.Config.RequestTimeout), func(c *gin.Context) {
 			handlers.Graphql.Playground.ServeHTTP(c.Writer, c.Request)
-		})
-		adminGroup.POST("/graphql", middleware.WithTimeout(server.Config.RequestTimeout), func(c *gin.Context) {
-			handlers.Graphql.Graphql.ServeHTTP(c.Writer, c.Request)
 		})
 		adminGroup.POST("/invitations", handlers.Invitation.Create)
 
@@ -150,6 +149,20 @@ func SetupRoutes(server *Server, handlers Handlers, client *ent.Client, services
 			middleware.WithTimeout(server.Config.RequestTimeout),
 			handlers.RequestPreview.PreviewRequest,
 		)
+	}
+
+	// Admin GraphQL accepts both the admin UI's JWT and service_account API keys.
+	// Service account principals are read-only; see middleware.WithAdminGraphqlAuth
+	// and gql.apiKeyReadOnly.
+	adminGraphqlGroup := server.Group(
+		"/admin",
+		middleware.WithAdminGraphqlAuth(services.AuthService),
+		middleware.WithProjectID(),
+	)
+	{
+		adminGraphqlGroup.POST("/graphql", middleware.WithTimeout(server.Config.RequestTimeout), func(c *gin.Context) {
+			handlers.Graphql.Graphql.ServeHTTP(c.Writer, c.Request)
+		})
 	}
 
 	openAPIGroup := server.Group(
@@ -198,6 +211,7 @@ func SetupRoutes(server *Server, handlers Handlers, client *ent.Client, services
 		openaiGroup.POST("/embeddings", handlers.OpenAI.CreateEmbedding)
 		openaiGroup.POST("/moderations", handlers.OpenAI.CreateModeration)
 		openaiGroup.POST("/alpha/search", handlers.OpenAI.CreateAlphaSearch)
+		openaiGroup.POST("/decisions", handlers.OpenAI.CreateDecisions)
 		openaiGroup.POST("/images/generations", handlers.OpenAI.CreateImage)
 		openaiGroup.POST("/images/edits", handlers.OpenAI.CreateImageEdit)
 		openaiGroup.POST("/videos", handlers.OpenAI.CreateVideo)
@@ -214,12 +228,20 @@ func SetupRoutes(server *Server, handlers Handlers, client *ent.Client, services
 
 		// Compatible with OpenAI API
 		openaiGroup.POST("/rerank", handlers.Jina.Rerank)
+
+		// Native System One endpoint
+		openaiGroup.POST("/systemone", handlers.TypeSafe.SystemOne)
 	}
 
 	{
 		jinaGroup := apiGroup.Group("/jina/v1")
 		jinaGroup.POST("/embeddings", handlers.Jina.CreateEmbedding)
 		jinaGroup.POST("/rerank", handlers.Jina.Rerank)
+	}
+
+	{
+		typesafeGroup := apiGroup.Group("/typesafe/v1")
+		typesafeGroup.POST("/systemone", handlers.TypeSafe.SystemOne)
 	}
 
 	{

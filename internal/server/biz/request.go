@@ -1114,7 +1114,7 @@ func (s *RequestService) UpdateRequestExecutionStatusWithMetrics(
 		return fmt.Errorf("failed to get request execution before status update: %w", err)
 	}
 	wasTerminal := isTerminalExecutionStatus(execution.Status)
-	if wasTerminal && !(execution.Status == requestexecution.StatusCompleted && status == requestexecution.StatusFailed) {
+	if wasTerminal && (execution.Status != requestexecution.StatusCompleted || status != requestexecution.StatusFailed) {
 		return nil
 	}
 	req, reqErr := client.Request.Get(ctx, execution.RequestID)

@@ -416,6 +416,12 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
   const [passThroughBody, setPassThroughBody] = useState<boolean | null>(() => {
     return initialRow?.settings?.passThroughBody ?? null;
   });
+  const [overrideCodexInstallationId, setOverrideCodexInstallationId] = useState(
+    () => initialRow?.settings?.overrideCodexInstallationId ?? false
+  );
+  const [codexInstallationIdCount, setCodexInstallationIdCount] = useState(
+    () => initialRow?.settings?.codexInstallationIdCount ?? 1
+  );
   const [quotaRoutingMode, setQuotaRoutingMode] = useState<ChannelQuotaRoutingMode>(() => recallQuotaRoutingMode(initialRow?.settings));
   const [retryableStatusCodesText, setRetryableStatusCodesText] = useState(() =>
     formatRetryableStatusCodes(initialRow?.settings?.retryableStatusCodes)
@@ -1492,6 +1498,8 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
       form.reset();
       setSupportedModels([]);
       setManualModels([]);
+      setOverrideCodexInstallationId(initialRow?.settings?.overrideCodexInstallationId ?? false);
+      setCodexInstallationIdCount(initialRow?.settings?.codexInstallationIdCount ?? 1);
       onOpenChange(false);
     } catch (_error) {
       void _error;
@@ -1894,6 +1902,8 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
             setProxyPassword(initialRow?.settings?.proxy?.password || '');
             setPassThroughUserAgent(initialRow?.settings?.passThroughUserAgent ?? null);
             setPassThroughBody(initialRow?.settings?.passThroughBody ?? null);
+            setOverrideCodexInstallationId(initialRow?.settings?.overrideCodexInstallationId ?? false);
+            setCodexInstallationIdCount(initialRow?.settings?.codexInstallationIdCount ?? 1);
             setQuotaRoutingMode(recallQuotaRoutingMode(initialRow?.settings));
             setRetryableStatusCodesText(formatRetryableStatusCodes(initialRow?.settings?.retryableStatusCodes));
             setRetryableErrorPatternsText(formatRetryableErrorPatterns(initialRow?.settings?.retryableErrorPatterns));

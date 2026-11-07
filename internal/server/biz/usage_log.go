@@ -3,6 +3,7 @@ package biz
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/samber/lo"
@@ -68,11 +69,32 @@ func (s *UsageLogService) computeUsageCost(ctx context.Context, channelID int, m
 		return items, lo.ToPtr(totalCost), modelPrice.ReferenceID
 	}
 
+	// Fallback: the channel has no explicit price for this model, so bill with
+	// the model library price configured under the Models menu. This keeps cost
+	// working when auto-configuration could not snapshot the price, for example
+	// when the model library price was added after the channel was created.
+	if price, ok := s.ChannelService.resolveModelLibraryPrice(ctx, modelID); ok {
+		items, total := ComputeUsageCost(usage, *price, time.Now())
+		totalCost := total.InexactFloat64()
+
+		if log.DebugEnabled(ctx) {
+			log.Debug(ctx, "computed usage cost from model library fallback",
+				log.Int("channel_id", channelID),
+				log.String("model_id", modelID),
+				log.Float64("total_cost", totalCost),
+				log.Int64("total_tokens", usage.TotalTokens),
+			)
+		}
+
+		return items, lo.ToPtr(totalCost), modelLibraryPriceReferenceID(modelID)
+	}
+
 	return nil, nil, ""
 }
 
 // InjectUsageCost writes AxonHub-calculated cost onto usage when a matching
-// channel model price is cached. usage is left unchanged when it is nil.
+// channel model price is cached, falling back to the model library price when
+// the channel has no explicit price. usage is left unchanged when it is nil.
 // When no matching price is available, usage.Cost is set to nil.
 func (s *UsageLogService) InjectUsageCost(ctx context.Context, channelID int, modelID string, usage *llm.Usage) {
 	if usage == nil {
@@ -233,6 +255,8 @@ func (s *UsageLogService) CreateUsageLogFromRequest(
 		return nil, nil
 	}
 
+	s.recordChatTokens(ctx, requestExec, usage)
+
 	return s.CreateUsageLog(ctx, CreateUsageLogParams{
 		RequestID:      request.ID,
 		ProjectID:      request.ProjectID,
@@ -261,4 +285,29 @@ func completionReasoningTokens(usage *llm.Usage) int64 {
 	}
 
 	return usage.CompletionTokensDetails.ReasoningTokens
+}
+
+// recordChatTokens reports the token usage of a chat request to the metrics
+// registry. Channel name resolution is best-effort: it must never block usage
+// log creation.
+func (s *UsageLogService) recordChatTokens(ctx context.Context, requestExec *ent.RequestExecution, usage *llm.Usage) {
+	if !appmetrics.Enabled() || requestExec == nil || usage == nil || usage.TotalTokens <= 0 {
+		return
+	}
+
+	channelID := ""
+	channelName := ""
+
+	if requestExec.ChannelID != 0 {
+		channelID = strconv.Itoa(requestExec.ChannelID)
+
+		// The enabled-channel cache covers the common case without a database
+		// round trip; a missing entry (e.g. disabled or deleted channel) only
+		// degrades the label.
+		if channel := s.ChannelService.GetEnabledChannel(requestExec.ChannelID); channel != nil {
+			channelName = channel.Name
+		}
+	}
+
+	appmetrics.Metrics.RecordChatTokens(ctx, channelID, channelName, usage.TotalTokens)
 }

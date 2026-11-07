@@ -34,6 +34,9 @@ func (t *OutboundTransformer) transformAlphaSearchRequest(ctx context.Context, l
 	var rawHeaders http.Header
 	if llmReq.RawRequest != nil && llmReq.RawRequest.Headers != nil {
 		rawHeaders = llmReq.RawRequest.Headers
+		// Keep client attribution headers off the wire: MergeInboundRequest runs
+		// after this transformer and would otherwise forward them upstream.
+		ScrubClientFingerprintHeaders(rawHeaders)
 	}
 	var envelope struct {
 		ID string `json:"id"`
@@ -54,9 +57,10 @@ func (t *OutboundTransformer) transformAlphaSearchRequest(ctx context.Context, l
 	} else {
 		headers.Set("Originator", AxonHubOriginator)
 	}
-	if userAgent := rawHeaders.Get("User-Agent"); userAgent != "" {
-		headers.Set("User-Agent", userAgent)
-	}
+	// The transformer owns the outbound User-Agent (see TransformRequest):
+	// the client UA is never copied, and the orchestrator's user-agent
+	// pass-through middleware overwrites this default when the switch is on.
+	headers.Set("User-Agent", codexDefaultUserAgent)
 	if headers.Get(SessionHeaderHyphen) == "" {
 		headers.Set(SessionHeaderHyphen, sessionID)
 	}

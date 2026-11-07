@@ -174,6 +174,9 @@ type OutboundTransformer struct {
 }
 
 func (t *OutboundTransformer) APIFormat() llm.APIFormat {
+	if t.config != nil && t.config.Transport == TransportWebSocket {
+		return llm.APIFormatOpenAIResponseWebSocket
+	}
 	return llm.APIFormatOpenAIResponse
 }
 
@@ -216,21 +219,20 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 	if llmReq == nil {
 		return nil, fmt.Errorf("chat request is nil")
 	}
-
-	originalRequestType := llmReq.RequestType
-	isImageRequest := originalRequestType == llm.RequestTypeImage
+	if t.APIFormat() == llm.APIFormatOpenAIResponseWebSocket {
+		switch llmReq.RequestType {
+		case llm.RequestTypeChat, "":
+		default:
+			return nil, fmt.Errorf("%w: WebSocket Responses requires a chat request", transformer.ErrUnsupportedConversion)
+		}
+	}
 
 	//nolint:exhaustive // Checked.
 	switch llmReq.RequestType {
 	case llm.RequestTypeCompact:
 		return t.transformCompactRequest(ctx, llmReq)
 	case llm.RequestTypeImage:
-		imageReq, err := buildImageToolRequest(llmReq)
-		if err != nil {
-			return nil, err
-		}
-
-		llmReq = imageReq
+		return nil, fmt.Errorf("%w: native Images endpoint is required for image requests", transformer.ErrInvalidRequest)
 	case llm.RequestTypeChat, "":
 		// continue
 	default:
@@ -251,9 +253,6 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 		switch item.Type {
 		case llm.ToolTypeImageGeneration:
 			tool := convertImageGenerationToTool(item)
-			if action := xmap.GetStringPtr(llmReq.TransformerMetadata, "image_generation_action"); action != nil {
-				tool.Action = *action
-			}
 			tools = append(tools, tool)
 			// Store image output format in TransformerMetadata
 			llmReq.TransformerMetadata["image_output_format"] = tool.OutputFormat
@@ -297,7 +296,7 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 		MaxOutputTokens:      llmReq.MaxCompletionTokens,
 		TopLogprobs:          llmReq.TopLogprobs,
 		TopP:                 llmReq.TopP,
-		ToolChoice:           convertToolChoice(llmReq.ToolChoice),
+		ToolChoice:           convertToolChoice(llmReq.ToolChoice, llmReq.Tools),
 		StreamOptions:        convertStreamOptions(llmReq.StreamOptions, llmReq.TransformerMetadata),
 		Reasoning:            convertReasoning(llmReq),
 		PromptCacheKey:       llmReq.PromptCacheKey,
@@ -306,6 +305,12 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 		MaxToolCalls:         xmap.GetInt64Ptr(llmReq.TransformerMetadata, "max_tool_calls"),
 		PromptCacheRetention: xmap.GetStringPtr(llmReq.TransformerMetadata, "prompt_cache_retention"),
 		Truncation:           xmap.GetStringPtr(llmReq.TransformerMetadata, "truncation"),
+	}
+
+	// Anthropic clients expect search result links, not just an answer's citations.
+	// Ask Responses backends for their full source list whenever it is available.
+	if llmReq.APIFormat == llm.APIFormatAnthropicMessage && lo.ContainsBy(llmReq.Tools, func(tool llm.Tool) bool { return tool.Type == llm.ToolTypeWebSearch }) && !lo.Contains(payload.Include, "web_search_call.action.sources") {
+		payload.Include = append(append([]string(nil), payload.Include...), "web_search_call.action.sources")
 	}
 
 	if lo.FromPtr(payload.PromptCacheKey) == "" {
@@ -357,14 +362,10 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 			Type:   "bearer",
 			APIKey: apiKey,
 		},
-		APIFormat:             string(llm.APIFormatOpenAIResponse),
+		APIFormat:             t.APIFormat().String(),
 		TransformerMetadata:   llmReq.TransformerMetadata,
 		SkipInboundQueryMerge: true,
 		Metadata:              nil,
-	}
-
-	if isImageRequest {
-		httpReq.RequestType = originalRequestType.String()
 	}
 
 	return httpReq, nil
@@ -399,29 +400,7 @@ func (t *OutboundTransformer) TransformResponse(
 		return t.transformCompactResponse(ctx, httpResp)
 	}
 
-	if httpResp.Request != nil && httpResp.Request.RequestType == llm.RequestTypeImage.String() {
-		return t.transformImageResponse(httpResp)
-	}
-
 	return t.transformStandardResponse(ctx, httpResp)
-}
-
-func (t *OutboundTransformer) transformImageResponse(httpResp *httpclient.Response) (*llm.Response, error) {
-	if httpResp.StatusCode >= http.StatusBadRequest {
-		return nil, fmt.Errorf("HTTP error %d: %s", httpResp.StatusCode, strings.TrimSpace(string(httpResp.Body)))
-	}
-
-	var upstream Response
-	if err := json.Unmarshal(httpResp.Body, &upstream); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal responses api image response: %w", err)
-	}
-
-	metadata := map[string]any{}
-	if httpResp.Request.TransformerMetadata != nil {
-		metadata = httpResp.Request.TransformerMetadata
-	}
-
-	return BuildImageResponse(&upstream, metadata)
 }
 
 func (t *OutboundTransformer) transformStandardResponse(

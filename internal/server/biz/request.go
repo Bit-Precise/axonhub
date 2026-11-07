@@ -10,7 +10,9 @@ import (
 	"net/http"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"entgo.io/ent/dialect"
@@ -40,6 +42,7 @@ type RequestService struct {
 	DataStorageService   *DataStorageService
 	LiveStreamRegistry   *LiveStreamRegistry
 	previousChannelCache xcache.Cache[int]
+	metricClaims         *requestMetricClaims
 }
 
 func requestMetricAttributes(ctx context.Context, req *ent.Request, channelID int, modelID string) appmetrics.RequestAttributes {
@@ -161,6 +164,10 @@ func recordUpstreamCompletionMetrics(
 	)
 }
 
+// recordedMetricRequestsTTL bounds how long a claimed request ID is kept in
+// the chat metrics deduplication.
+const recordedMetricRequestsTTL = time.Hour
+
 // NewRequestService creates a new RequestService.
 func NewRequestService(
 	ent *ent.Client,
@@ -179,6 +186,7 @@ func NewRequestService(
 		DataStorageService:   dataStorageService,
 		LiveStreamRegistry:   liveStreamRegistry,
 		previousChannelCache: xcache.NewFromConfig[int](cacheConfig),
+		metricClaims:         newRequestMetricClaims(),
 	}
 }
 
@@ -194,6 +202,41 @@ func (s *RequestService) shouldUseExternalStorage(_ context.Context, ds *ent.Dat
 
 // _InvalidRequestBodyJSON returns a JSON object indicating invalid text.
 var _InvalidRequestBodyJSON = objects.JSONRawMessage(`{"message":"invalid text"}`)
+
+// jsonNulEscape is the JSON escape of U+0000. PostgreSQL jsonb rejects it
+// (SQLSTATE 22P05), which would otherwise lose the whole payload.
+var jsonNulEscape = []byte(`\u0000`)
+
+// stripJSONNul removes U+0000 escapes from a JSON document so it can be stored
+// in a jsonb column. An escaped backslash followed by "u0000" is plain text and
+// is kept. Documents without the escape are returned as is.
+func stripJSONNul(body objects.JSONRawMessage) objects.JSONRawMessage {
+	if !bytes.Contains(body, jsonNulEscape) {
+		return body
+	}
+
+	out := make(objects.JSONRawMessage, 0, len(body))
+
+	for i := 0; i < len(body); {
+		if body[i] == '\\' && i+1 < len(body) {
+			if bytes.HasPrefix(body[i:], jsonNulEscape) {
+				i += len(jsonNulEscape)
+				continue
+			}
+
+			// Copy the escape pair as a unit so `\\u0000` is not mistaken for a NUL.
+			out = append(out, body[i], body[i+1])
+			i += 2
+
+			continue
+		}
+
+		out = append(out, body[i])
+		i++
+	}
+
+	return out
+}
 
 // External payload markers live in the DB when the real JSON is in object storage.
 // They must not match the GC strip placeholders (`{}` / `[]`).
@@ -382,7 +425,7 @@ func (s *RequestService) CreateRequest(
 		mut = mut.SetRequestBody([]byte("{}"))
 	} else {
 		// Store in database
-		mut = mut.SetRequestBody(requestBodyBytes)
+		mut = mut.SetRequestBody(stripJSONNul(requestBodyBytes))
 	}
 
 	if dataStorage != nil {
@@ -506,7 +549,7 @@ func (s *RequestService) CreateRequestExecution(
 		requestBodyForDB = []byte("{}")
 	} else {
 		// Store in database
-		requestBodyForDB = requestBodyBytes
+		requestBodyForDB = stripJSONNul(requestBodyBytes)
 	}
 
 	mut := client.RequestExecution.Create().
@@ -599,7 +642,7 @@ func extractOutboundReasoningEffort(channelRequest httpclient.Request, format ll
 	switch format {
 	case llm.APIFormatOpenAIChatCompletion:
 		path = "reasoning_effort"
-	case llm.APIFormatOpenAIResponse, llm.APIFormatOpenAIResponseCompact:
+	case llm.APIFormatOpenAIResponse, llm.APIFormatOpenAIResponseWebSocket, llm.APIFormatOpenAIResponseCompact:
 		path = "reasoning.effort"
 	case llm.APIFormatAnthropicMessage:
 		path = "output_config.effort"
@@ -711,7 +754,7 @@ func (s *RequestService) UpdateRequestFinalized(ctx context.Context, requestID i
 		if err != nil {
 			return err
 		}
-		upd = upd.SetResponseBody(responseBodyBytes)
+		upd = upd.SetResponseBody(stripJSONNul(responseBodyBytes))
 	}
 
 	updated, err := s.saveRequestTransition(ctx, upd, requestID)
@@ -724,6 +767,7 @@ func (s *RequestService) UpdateRequestFinalized(ctx context.Context, requestID i
 	}
 
 	recordDownstreamCompletionMetrics(ctx, req, status)
+	s.recordChatRequestMetrics(ctx, req, status, metrics)
 
 	if _, transactional := client.Driver().(dialect.Tx); transactional {
 		return nil
@@ -741,6 +785,92 @@ func (s *RequestService) UpdateRequestFinalized(ctx context.Context, requestID i
 	}
 
 	return nil
+}
+
+// recordChatRequestMetrics reports the transition of a request into a
+// terminal state to the metrics registry. It is a no-op when metrics are
+// disabled, the target status is not terminal, or the request was already
+// terminal before the update: status refreshes that re-save an already
+// terminal outcome (e.g. repeated video task polls) and marks that follow an
+// earlier terminal outcome must not be counted again. req must reflect the
+// pre-update status. Recording is best-effort: channel name resolution and
+// metric recording must never affect request finalization.
+func (s *RequestService) recordChatRequestMetrics(ctx context.Context, req *ent.Request, status request.Status, latency *LatencyMetrics) {
+	if !appmetrics.Enabled() || !isTerminalRequestStatus(status) || isTerminalRequestStatus(req.Status) {
+		return
+	}
+
+	// Concurrent terminal setters can both observe the pre-update status;
+	// the claim ensures only one of them records.
+	if !s.metricClaims.claim(req.ID) {
+		return
+	}
+
+	channelID := ""
+	channelName := ""
+
+	if req.ChannelID != 0 {
+		channelID = strconv.Itoa(req.ChannelID)
+
+		// Best-effort lookup: a deleted channel must not break finalization.
+		if channel, err := req.QueryChannel().Only(ctx); err == nil {
+			channelName = channel.Name
+		}
+	}
+
+	duration := 0.0
+	if latency != nil && latency.LatencyMs != nil {
+		duration = float64(*latency.LatencyMs) / 1000
+	} else if !req.CreatedAt.IsZero() {
+		duration = time.Since(req.CreatedAt).Seconds()
+	}
+
+	appmetrics.Metrics.RecordChatRequest(ctx, channelID, channelName, duration, status == request.StatusCompleted)
+}
+
+// requestMetricClaims atomically deduplicates chat metric recording per
+// request: exactly one of several concurrent or sequential terminal setters
+// wins the claim for a request ID. Claims expire so the map stays bounded
+// without a background goroutine.
+type requestMetricClaims struct {
+	mu        sync.Mutex
+	claimed   map[int]time.Time
+	lastPrune time.Time
+}
+
+func newRequestMetricClaims() *requestMetricClaims {
+	return &requestMetricClaims{
+		claimed: map[int]time.Time{},
+	}
+}
+
+// claim reports whether the caller won the exclusive right to record the
+// request, recording the claim when it does.
+func (c *requestMetricClaims) claim(requestID int) bool {
+	now := time.Now()
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Prune expired claims at most once per TTL so the common path stays
+	// O(1) while the map is bounded to roughly one TTL of requests.
+	if now.Sub(c.lastPrune) > recordedMetricRequestsTTL {
+		for id, at := range c.claimed {
+			if now.Sub(at) > recordedMetricRequestsTTL {
+				delete(c.claimed, id)
+			}
+		}
+
+		c.lastPrune = now
+	}
+
+	if _, ok := c.claimed[requestID]; ok {
+		return false
+	}
+
+	c.claimed[requestID] = now
+
+	return true
 }
 
 // UpdateRequestCompletedWithAudio marks a request completed and persists a binary audio
@@ -819,7 +949,7 @@ func (s *RequestService) UpdateRequestCompletedWithAudio(
 				upd = upd.SetResponseBody(ExternalResponseBodyMarker)
 			}
 		} else {
-			upd = upd.SetResponseBody(responseBodyBytes)
+			upd = upd.SetResponseBody(stripJSONNul(responseBodyBytes))
 		}
 	}
 
@@ -843,6 +973,8 @@ func (s *RequestService) UpdateRequestCompletedWithAudio(
 		log.Error(ctx, "Failed to update audio request status to completed", log.Cause(err))
 		return err
 	}
+
+	s.recordChatRequestMetrics(ctx, req, request.StatusCompleted, metrics)
 
 	return nil
 }
@@ -926,7 +1058,7 @@ func (s *RequestService) UpdateRequestStatusExternalIDAndResponseBody(
 			}
 		} else {
 			// Store in database
-			upd = upd.SetResponseBody(responseBodyBytes)
+			upd = upd.SetResponseBody(stripJSONNul(responseBodyBytes))
 		}
 	}
 
@@ -938,6 +1070,7 @@ func (s *RequestService) UpdateRequestStatusExternalIDAndResponseBody(
 	}
 
 	recordDownstreamCompletionMetrics(ctx, req, status)
+	s.recordChatRequestMetrics(ctx, req, status, metrics)
 
 	return nil
 }
@@ -1025,7 +1158,7 @@ func (s *RequestService) UpdateRequestExecutionFinalized(
 		if err != nil {
 			return err
 		}
-		upd = upd.SetResponseBody(responseBodyBytes)
+		upd = upd.SetResponseBody(stripJSONNul(responseBodyBytes))
 	}
 
 	updated, err := s.saveExecutionTransition(ctx, upd, executionID)
@@ -1474,6 +1607,7 @@ func (s *RequestService) UpdateRequestStatus(ctx context.Context, requestID int,
 
 	if updated {
 		recordDownstreamCompletionMetrics(ctx, req, status)
+		s.recordChatRequestMetrics(ctx, req, status, nil)
 	}
 
 	return nil
@@ -1665,6 +1799,10 @@ func (s *RequestService) LoadCompletedResponsesSession(
 	if responseID == "" || !ok || apiKey == nil {
 		return nil, nil, false, nil
 	}
+	projectID, hasProject := contexts.GetProjectID(ctx)
+	if !hasProject {
+		return nil, nil, false, nil
+	}
 
 	query := s.entFromContext(ctx).Request.Query().Where(
 		request.ExternalIDEQ(responseID),
@@ -1675,9 +1813,7 @@ func (s *RequestService) LoadCompletedResponsesSession(
 		),
 		request.StatusEQ(request.StatusCompleted),
 	)
-	if projectID, ok := contexts.GetProjectID(ctx); ok {
-		query = query.Where(request.ProjectIDEQ(projectID))
-	}
+	query = query.Where(request.ProjectIDEQ(projectID))
 
 	req, err := query.Order(ent.Desc(request.FieldCreatedAt)).First(ctx)
 	if err != nil {
@@ -1699,6 +1835,9 @@ func (s *RequestService) LoadCompletedResponsesSession(
 		bytes.Equal(storedResponse, xjson.EmptyJSONRawMessage) ||
 		!json.Valid(storedRequest) ||
 		!json.Valid(storedResponse) {
+		return nil, nil, false, nil
+	}
+	if !certifiedResponsesSnapshot(storedRequest, storedResponse, responseID) {
 		return nil, nil, false, nil
 	}
 
